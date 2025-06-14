@@ -19,7 +19,31 @@ services:
       - app_network
     environment: # Example for future API keys
       GOOGLE_API_KEY: "your_google_api_key_here" # REPLACE WITH YOUR ACTUAL KEY LATER, OR USE .env FILE
+      DB_HOST: db
+      DB_NAME: palantir_db
+      DB_USER: palantir_user
+      DB_PASSWORD: ${DB_PASSWORD} # <-- NOW REFERENCES VARIABLE FROM .env
+
+  db:
+    image: postgres:15-alpine # Use a lightweight PostgreSQL image
+    environment:
+      POSTGRES_DB: palantir_db     # Same as DB_NAME above
+      POSTGRES_USER: palantir_user   # Same as DB_USER above
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD} # <-- NOW REFERENCES VARIABLE FROM .env
+    volumes:
+      - db_data:/var/lib/postgresql/data # Persistent volume for database data
+    networks:
+      - app_network
+    healthcheck: # <-- Optional but recommended for production readiness
+      test: ["CMD-SHELL", "pg_isready -U palantir_user -d palantir_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
 
 networks:
   app_network:
     driver: bridge
+
+volumes: 
+  db_data: # Define the named volume

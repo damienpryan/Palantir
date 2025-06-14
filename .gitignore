@@ -16,3 +16,6 @@ venv/
 # Environment variables
 .env
 *.env
+
+# Editor files
+*.swp
