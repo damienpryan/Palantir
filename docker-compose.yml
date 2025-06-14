@@ -11,6 +11,17 @@ services:
     networks:
       - app_network   # Define a custom network for inter-container comms
 
+  app: 
+    build: ./app # Tells Docker Compose to build the image from the Dockerfile in the ./app directory
+    ports:
+      - "5000:5000" # Expose Flask app port directly for initial testing
+    volumes:
+      - ./app:/app # Mount the app directory for live code changes (useful during dev)
+    networks:
+      - app_network
+    environment: # Example for future API keys
+      GOOGLE_API_KEY: "your_google_api_key_here" # REPLACE WITH YOUR ACTUAL KEY LATER, OR USE .env FILE
+
 networks:
   app_network:
     driver: bridge
