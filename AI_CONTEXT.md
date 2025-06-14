@@ -27,4 +27,8 @@ Here's some ongoing context about my project and setup:
 **Learning Focus:**
 * **Key Learning Area:** Need to learn and become proficient with **GitHub** (as accustomed to older systems like RCS).
 
+**Other considerations:**
+I'm used to 'vi' give me instructions with vi not nano
+
+
 [END CONTEXT]
