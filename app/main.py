@@ -1,54 +1,52 @@
-import os
 from flask import Flask
-import psycopg2
-from psycopg2 import OperationalError # Import OperationalError for connection issues
+from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
+import os
 
 app = Flask(__name__)
 
-# Function to get a database connection
-def get_db_connection():
-    db_host = os.environ.get('DB_HOST')
-    db_name = os.environ.get('DB_NAME')
-    db_user = os.environ.get('DB_USER')
-    db_password = os.environ.get('DB_PASSWORD')
+# Database Configuration
+app.config['SQLALCHEMY_DATABASE_URI'] = f"postgresql://{os.environ.get('DB_USER')}:{os.environ.get('DB_PASSWORD')}@{os.environ.get('DB_HOST')}/{os.environ.get('DB_NAME')}"
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False  # Suppress a warning
 
-    conn = None
-    try:
-        conn = psycopg2.connect(
-            host=db_host,
-            database=db_name,
-            user=db_user,
-            password=db_password
-        )
-        print("Database connection successful.")
-        return conn
-    except OperationalError as e:
-        print(f"Error connecting to database: {e}")
-        return None
+db = SQLAlchemy(app)
+migrate = Migrate(app, db)
+
+# Define a Database Model (Example: ChatHistory)
+class ChatHistory(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    session_id = db.Column(db.String(255), nullable=False)
+    user_message = db.Column(db.Text, nullable=False)
+    bot_response = db.Column(db.Text, nullable=False)
+    timestamp = db.Column(db.DateTime, server_default=db.func.now())
+
+    def __repr__(self):
+        return f'<ChatHistory(user_message={self.user_message[:50]}, bot_response={self.bot_response[:50]})>'
+
 
 @app.route('/')
 def hello_world():
-    return 'Hello, Palantir Project Flask App!'
+    return 'Hello, Palantir Project Flask App! (with SQLAlchemy)'
 
 @app.route('/db_test')
 def db_test():
-    conn = get_db_connection()
-    if conn:
-        try:
-            cur = conn.cursor()
-            cur.execute('SELECT version();') # A simple query to get PostgreSQL version
-            db_version = cur.fetchone()[0]
-            cur.close()
-            return f'Successfully connected to PostgreSQL! Version: {db_version}'
-        except Exception as e:
-            return f'Error performing database query: {e}'
-        finally:
-            conn.close() # Close connection after use
-    else:
-        return 'Could not connect to the database.', 500
+    try:
+        # Note: db.create_all() is typically used for initial setup or in development,
+        # but in production, you primarily rely on Flask-Migrate's 'upgrade' command.
+        # Keeping it here for quick testing, it won't recreate if tables exist.
+        db.create_all()
+
+        # Example: Add a chat history entry
+        new_entry = ChatHistory(session_id='test_session_sql_alchemy', user_message='Hello from SQLAlchemy!', bot_response='Hi there from SQLAlchemy!')
+        db.session.add(new_entry)
+        db.session.commit()
+
+        # Query to verify the addition
+        all_chats = ChatHistory.query.all()
+        return f'Successfully connected to PostgreSQL with SQLAlchemy! Added {len(all_chats)} entries. Last entry: {all_chats[-1].user_message}'
+    except Exception as e:
+        db.session.rollback() # Rollback in case of error
+        return f'Error: {e}', 500
 
 if __name__ == '__main__':
-    # In a Dockerized Gunicorn setup, app.run() is typically not executed
-    # because Gunicorn handles running the Flask app.
-    # This block is mainly for local development outside of Docker Compose.
     app.run(debug=True, host='0.0.0.0', port=5000)
