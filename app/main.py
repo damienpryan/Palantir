@@ -2,11 +2,20 @@ from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 import os
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.schema import HumanMessage, SystemMessage
 
 app = Flask(__name__)
 
+# Initialize Google Gemini LLM
+google_api_key = os.environ.get("GOOGLE_API_KEY")
+if not google_api_key or google_api_key == "your_google_api_key_here":
+    print("WARNING: GOOGLE_API_KEY not set or is placeholder. LLM calls will fail.")
+llm = ChatGoogleGenerativeAI(model="gemini-pro", google_api_key=google_api_key)
+
+
 # Database Configuration
-app.config['SQLALCHEMY_DATABASE_URI'] = f"postgresql://{os.environ.get('DB_USER')}:{os.environ.get('DB_PASSWORD')}@{os.environ.get('DB_HOST')}/{os.environ.get('DB_NAME')}"
+app.config['SQLALCHEMY_DATABASE_URI'] = f"postgresql://{os.environ.get('APP_DB_USER')}:{os.environ.get('APP_DB_PASSWORD')}@{os.environ.get('APP_DB_HOST')}/{os.environ.get('APP_DB_NAME')}"
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False  # Suppress a warning
 
 db = SQLAlchemy(app)
@@ -47,6 +56,21 @@ def db_test():
     except Exception as e:
         db.session.rollback() # Rollback in case of error
         return f'Error: {e}', 500
+
+@app.route('/chat/<query>')
+def chat_with_llm(query):
+    if not google_api_key or google_api_key == "your_google_api_key_here":
+        return "Error: Google API Key not configured.", 500
+
+    try:
+        messages = [
+            SystemMessage(content="You are a helpful AI assistant."),
+            HumanMessage(content=query),
+        ]
+        response = llm.invoke(messages)
+        return response.content
+    except Exception as e:
+        return f"Error communicating with LLM: {e}", 500
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)

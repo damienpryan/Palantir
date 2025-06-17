@@ -1,49 +1,109 @@
 services:
-  nginx:
-    image: nginx:latest # Use the official Nginx Docker image
-    ports:
-      - "80:80"         # Map host port 80 to container port 80
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro # Mount our custom config
-      - ./nginx/html:/usr/share/nginx/html:ro       # Mount our static HTML files
-    networks:
-      - app_network   # Define a custom network for inter-container comms
-    depends_on: 
-      - app
-
-  app: 
-    build: ./app # Tells Docker Compose to build the image from the Dockerfile in the ./app directory
-    volumes:
-      - ./app:/app # Mount the app directory for live code changes (useful during dev)
-    networks:
-      - app_network
-    environment: # Example for future API keys
-      GOOGLE_API_KEY: "your_google_api_key_here" # REPLACE WITH YOUR ACTUAL KEY LATER, OR USE .env FILE
-      DB_HOST: db
-      DB_NAME: palantir_db
-      DB_USER: palantir_user
-      DB_PASSWORD: ${DB_PASSWORD} # <-- NOW REFERENCES VARIABLE FROM .env
-
-  db:
-    image: postgres:15-alpine # Use a lightweight PostgreSQL image
+  cloudflare-tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflare-tunnel
+    restart: unless-stopped
+    command: tunnel run
     environment:
-      POSTGRES_DB: palantir_db     # Same as DB_NAME above
-      POSTGRES_USER: palantir_user   # Same as DB_USER above
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD} # <-- NOW REFERENCES VARIABLE FROM .env
-    volumes:
-      - db_data:/var/lib/postgresql/data # Persistent volume for database data
+      # You will need to create a tunnel and retrieve this token from Cloudflare Zero Trust dashboard
+      # Instructions for this will follow.
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
     networks:
       - app_network
-    healthcheck: # <-- Optional but recommended for production readiness
-      test: ["CMD-SHELL", "pg_isready -U palantir_user -d palantir_db"]
+
+  nginx:
+    image: nginx:latest
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/html:/usr/share/nginx/html:ro
+    ports:
+      - "80:80" 
+    networks:
+      - app_network
+    depends_on:
+      - app # Nginx needs the app to be available
+      - cloudflare-tunnel # Cloudflare tunnel needs nginx to proxy to
+
+  app:
+    build: ./app
+    volumes:
+      - ./app:/app
+    networks:
+      - app_network
+    environment:
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY} # References variable from .env
+      # app_db connection details
+      APP_DB_HOST: app_db
+      APP_DB_NAME: palantir_app_db
+      APP_DB_USER: palantir_user
+      APP_DB_PASSWORD: ${DB_PASSWORD} # References variable from .env
+      # vector_db connection details (for LangChain)
+      VECTOR_DB_HOST: vector_db
+      VECTOR_DB_NAME: palantir_vector_db
+      VECTOR_DB_USER: palantir_vector_user
+      VECTOR_DB_PASSWORD: ${VECTOR_DB_PASSWORD} # New variable from .env
+    depends_on:
+      - app_db
+      - vector_db # App needs both databases
+
+  app_db:
+    image: postgres:15-alpine
+    container_name: palantir_app_db
+    environment:
+      POSTGRES_DB: palantir_app_db
+      POSTGRES_USER: palantir_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - app_db_data:/var/lib/postgresql/data
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U palantir_user -d palantir_app_db"]
       interval: 5s
       timeout: 5s
       retries: 5
 
+  vector_db:
+    image: pgvector/pgvector:pg16 # Using pgvector image for easier setup
+    container_name: palantir_vector_db
+    environment:
+      POSTGRES_DB: palantir_vector_db
+      POSTGRES_USER: palantir_vector_user
+      POSTGRES_PASSWORD: ${VECTOR_DB_PASSWORD} # New variable from .env
+    volumes:
+      - vector_db_data:/var/lib/postgresql/data
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U palantir_vector_user -d palantir_vector_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  ingestion:
+    build: ./ingestion # We will create this directory and Dockerfile next
+    volumes:
+      - ./ingestion:/ingestion # Mount for live code changes
+      - /home/damien/my_qad_code:/qad-code-repo:ro
+    networks:
+      - app_network
+    environment:
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY} # References variable from .env
+      VECTOR_DB_HOST: vector_db
+      VECTOR_DB_NAME: palantir_vector_db
+      VECTOR_DB_USER: palantir_vector_user
+      VECTOR_DB_PASSWORD: ${VECTOR_DB_PASSWORD}
+      CODE_REPO_PATH: /qad-code-repo 
+      # GITHUB_QAD_REPO_URL: "https://github.com/youruser/your-qad-repo.git" # For ingestion to pull from
+      # GITHUB_TOKEN: ${GITHUB_TOKEN} # If your repo is private
+    # command: python ingestion_script.py # Example, actual command defined in Dockerfile or run manually
+    depends_on:
+      - vector_db # Ingestion needs the vector database
 
 networks:
   app_network:
     driver: bridge
 
-volumes: 
-  db_data: # Define the named volume
+volumes:
+  app_db_data: # Volume for Flask app's PostgreSQL data
+  vector_db_data: # Volume for LLM vector database data

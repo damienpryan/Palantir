@@ -17,6 +17,14 @@ find . -type f ! -path '*/.env' -print0 | while IFS= read -r -d $'\0' file; do
     if [[ "$file" == "./.git/"* ]]; then
         continue
     fi
+    # Skip Python bytecode files
+    if [[ "$file" == *.pyc ]]; then # Corrected line
+        continue
+    fi
+    # Skip __pycache__ directories (though .pyc exclusion handles files within them)
+    if [[ "$file" == *"/__pycache__/"* ]]; then
+        continue
+    fi
     # Skip script itself if it's in the directory
     if [[ "$file" == "./dump_project.sh" ]]; then
         continue
@@ -34,3 +42,15 @@ find . -type f ! -path '*/.env' -print0 | while IFS= read -r -d $'\0' file; do
 done
 
 echo "--- PROJECT DUMP END ---"
+echo "--- About to Git status ---"
+git status .
+echo "--- end Git status ---"
+
+echo "--- About to Git ls-files ---"
+git ls-files
+echo "--- end Git ls-files ---"
+
+
+
+
+
