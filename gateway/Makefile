@@ -34,18 +34,18 @@ build:
 
 # --- Testing Targets ---
 test:
-    @echo "Running UNIT tests for gateway service..."
-    # Placeholder: Add actual frontend/Nginx config unit tests here if applicable.
-    @echo "No dedicated unit tests configured for gateway yet. (Add npm/js tests here if applicable)"
+	@echo "Running UNIT tests for gateway service..."
+	# Placeholder: Add actual frontend/Nginx config unit tests here if applicable.
+	@echo "No dedicated unit tests configured for gateway yet. (Add npm/js tests here if applicable)"
 
 test-integration:
-    @echo "Running INTEGRATION tests for gateway..."
-    @echo "Checking Nginx static file service (localhost:80)..."
-    # curl --fail makes curl exit with an error code if the request fails (e.g., 4xx/5xx status)
-    # > /dev/null suppresses output, && ... || (...) provides success/failure message
-    curl --fail http://localhost:80 > /dev/null && echo "SUCCESS: Nginx on localhost:80 is accessible." || (echo "FAILURE: Nginx on localhost:80 is NOT accessible." && exit 1)
+	@echo "Running INTEGRATION tests for gateway..."
+	@echo "Checking Nginx static file service (localhost:80)..."
+	# curl --fail makes curl exit with an error code if the request fails (e.g., 4xx/5xx status)
+	# > /dev/null suppresses output, && ... || (...) provides success/failure message
+	curl --fail http://localhost:80 > /dev/null && echo "SUCCESS: Nginx on localhost:80 is accessible." || (echo "FAILURE: Nginx on localhost:80 is NOT accessible." && exit 1)
 
-    @echo "Checking Nginx static file service (ryancs.com.au)..."
-    curl --fail http://ryancs.com.au > /dev/null && echo "SUCCESS: Nginx on ryancs.com.au is accessible." || (echo "FAILURE: Nginx on ryancs.com.au is NOT accessible." && exit 1)
+	@echo "Checking Nginx static file service (ryancs.com.au)..."
+	curl --fail http://ryancs.com.au > /dev/null && echo "SUCCESS: Nginx on ryancs.com.au is accessible." || (echo "FAILURE: Nginx on ryancs.com.au is NOT accessible." && exit 1)
 
-    @echo "Gateway integration tests passed."
+	@echo "Gateway integration tests passed."
