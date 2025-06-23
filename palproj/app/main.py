@@ -71,17 +71,49 @@ def home():
 
 # Placeholder for a database test route (from your dump)
 @app.route('/db_test')
+# Placeholder for a database test route (from your dump)
+@app.route('/db_test')
 def db_test():
     try:
-        # Example: Replace with an actual DB query to test connection
-        # from sqlalchemy import text
-        # db.session.execute(text("SELECT 1"))
-        return jsonify({"status": "Database connection seems OK (placeholder for actual test)"})
+        from flask_sqlalchemy import SQLAlchemy # Import SQLAlchemy here if not global
+        from sqlalchemy import text # Import text for raw SQL queries
+
+        # Assume your 'db' object from Flask-SQLAlchemy is initialized somewhere
+        # If not, you might need to import it or create a temporary connection here
+        # For now, let's just make sure db is available from Flask-SQLAlchemy
+        # For simplicity, if Flask-SQLAlchemy 'db' object is not globally defined,
+        # you might need to add a line like:
+        # db = SQLAlchemy(app) # if not done globally already.
+        # But usually it's `db = SQLAlchemy()` then `db.init_app(app)`.
+
+        # Let's assume Flask-SQLAlchemy is configured via `app.config`
+        # and you have an initialized `db` object.
+        # If your db object is named 'db', then use 'db.session.execute'
+
+        # TEMPORARY: For a quick test, let's use psycopg2 directly if SQLAlchemy setup is complex
+        import psycopg2
+        DB_HOST = os.environ.get("APP_DB_HOST", "app_db")
+        DB_NAME = os.environ.get("APP_DB_NAME", "palantir_app_db")
+        DB_USER = os.environ.get("APP_DB_USER", "palantir_user")
+        DB_PASSWORD = os.environ.get("APP_DB_PASSWORD") # Get from .env
+
+        conn = psycopg2.connect(host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD)
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1") # A simple query to test connection
+        result = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        # If we reached here, connection was successful
+        app.logger.info("Successfully connected to app_db from /db_test.")
+        return jsonify({"status": "Database connection successful", "test_query_result": result[0]})
     except Exception as e:
+        app.logger.error(f"Error connecting to app_db from /db_test: {e}")
         return jsonify({"status": "Database connection error", "error": str(e)}), 500
 
+
 # Your COMBINED RAG chat endpoint
-@app.route('/chat/<path:query>', methods=['GET', 'POST']) 
+@app.route('/chat/<path:query>', methods=['GET', 'POST'])
 def chat(query):
     global last_uploaded_file_content # Access the global variable
 
@@ -95,12 +127,12 @@ def chat(query):
         if last_uploaded_file_content:
             effective_query = f"Here is some relevant context:\n{last_uploaded_file_content}\n\nBased on this context and the following question: {query}"
             app.logger.info(f"Using uploaded file content as context for query: {query}")
-        
+    
         messages = [
             SystemMessage(content="You are a helpful AI assistant for OpenEdge code. Provide concise and relevant information based on the user's query and any provided context."),
             HumanMessage(content=effective_query),
         ]
-        
+    
         llm_response_object = llm.invoke(messages)
         llm_response_content = llm_response_object.content # Extract content from the LangChain response object
         # --- END ORIGINAL LANGCHAIN RAG LOGIC ---
@@ -112,7 +144,7 @@ def chat(query):
         return jsonify({"response": f"Error communicating with LLM: {str(e)}"}), 500
 
 
-@app.route('/upload_context', methods=['POST']) 
+@app.route('/upload_context', methods=['POST'])
 def upload_context():
     global last_uploaded_file_content # Declare intent to modify global
 
@@ -154,7 +186,7 @@ def upload_context():
 
     return jsonify({"message": "File upload failed"}), 500
 
-@app.route('/download/<filename>', methods=['GET']) 
+@app.route('/download/<filename>', methods=['GET'])
 def download_file(filename):
     try:
         # This will serve files from the UPLOAD_FOLDER
