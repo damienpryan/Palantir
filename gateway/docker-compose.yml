@@ -23,11 +23,10 @@ services:
   nginx:
     image: nginx:latest
     volumes:
-      # This path is now relative to the gateway directory
-      - [cite_start]./nginx/nginx.conf:/etc/nginx/nginx.conf:ro [cite: 4]
-      - [cite_start]./nginx/html:/usr/share/nginx/html:ro [cite: 4]
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro # <-- Corrected line 26
+      - ./nginx/html:/usr/share/nginx/html:ro
     ports:
-      - [cite_start]"80:80" [cite: 4]
+      - "80:80"
     networks:
       - homelab_network # Connect to our new shared network
     depends_on:
@@ -38,4 +37,3 @@ networks:
   homelab_network:
     driver: bridge
     name: homelab_network # Explicitly naming it is a good practice
-
