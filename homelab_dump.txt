@@ -1,0 +1,3466 @@
+--- PROJECT DUMP START ---
+
+--- FILE_START: ./homelab_dump.txt
+--- CONTENT_START ---
+--- FILE_END: ./homelab_dump.txt
+
+--- FILE_START: ./Makefile
+--- CONTENT_START ---
+# homelab/Makefile - Master Orchestrator
+
+# Add the new dump targets to the .PHONY list
+.PHONY: up down logs restart status dump-all dump-gateway dump-palproj
+
+# --- Service Management Targets ---
+up:
+	@echo "--- Starting all homelab stacks (gateway -> palproj) ---"
+	$(MAKE) -C gateway up
+	$(MAKE) -C palproj up
+
+down:
+	@echo "--- Stopping all homelab stacks (palproj -> gateway) ---"
+	$(MAKE) -C palproj down
+	$(MAKE) -C gateway down
+
+logs:
+	@if [ -z "$(stack)" ]; then \
+	    echo "--- Tailing combined logs for all stacks ---"; \
+	    docker compose -f gateway/docker-compose.yml -f palproj/docker-compose.yml logs -f; \
+	else \
+	    echo "--- Tailing logs for $(stack) stack ---"; \
+	    $(MAKE) -C $(stack) logs; \
+	fi
+
+restart: down up
+
+status:
+	@echo "--- Status for gateway stack ---"
+	$(MAKE) -C gateway status
+	@echo "\n--- Status for palproj stack ---"
+	$(MAKE) -C palproj status
+
+# --- AI Context Dumping Targets ---
+# Dumps the entire project from the homelab root.
+dump-all:
+	@echo "Dumping all project files to homelab_dump.txt..."
+	./dump_project.sh > homelab_dump.txt
+
+# Dumps only the gateway subdirectory.
+dump-gateway:
+	@echo "Dumping gateway files to gateway_dump.txt..."
+	(cd gateway && ../dump_project.sh) > gateway_dump.txt
+
+# Dumps only the palproj subdirectory.
+dump-palproj:
+	@echo "Dumping palproj files to palproj_dump.txt..."
+	(cd palproj && ../dump_project.sh) > palproj_dump.txt
+--- FILE_END: ./Makefile
+
+--- FILE_START: ./gateway/docker-compose.yml
+--- CONTENT_START ---
+# homelab/gateway/docker-compose.yml
+services:
+  cloudflare-tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflare-tunnel
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    networks:
+      - homelab_network # Connect to our new shared network
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+      memlock:
+        soft: -1
+        hard: -1
+
+  nginx:
+    image: nginx:latest
+    volumes:
+      # This path is now relative to the gateway directory
+      - [cite_start]./nginx/nginx.conf:/etc/nginx/nginx.conf:ro [cite: 4]
+      - [cite_start]./nginx/html:/usr/share/nginx/html:ro [cite: 4]
+    ports:
+      - [cite_start]"80:80" [cite: 4]
+    networks:
+      - homelab_network # Connect to our new shared network
+    depends_on:
+      - cloudflare-tunnel
+
+# This block creates the network that palproj will also use.
+networks:
+  homelab_network:
+    driver: bridge
+    name: homelab_network # Explicitly naming it is a good practice
+
+--- FILE_END: ./gateway/docker-compose.yml
+
+--- FILE_START: ./gateway/Makefile
+--- CONTENT_START ---
+# homelab/gateway/Makefile
+
+# This line tells 'make' that our targets don't correspond to actual files.
+# It's a best practice to prevent conflicts and ensure commands always run.
+.PHONY: up down logs restart status build
+
+# Start all services in detached mode, building images if necessary.
+up:
+    @echo "Starting gateway services..."
+    docker compose up --build -d
+
+# Stop and remove all services, networks, and volumes.
+down:
+    @echo "Stopping gateway services and cleaning up..."
+    docker compose down -v
+
+# View the live logs for all running services.
+logs:
+    @echo "Tailing gateway logs (Press Ctrl+C to exit)..."
+    docker compose logs -f
+
+# Restart all services (run 'down' then 'up').
+restart: down up
+
+# Show the status of running containers.
+status:
+    @echo "Checking status of gateway services..."
+    docker compose ps
+
+# Force a rebuild of the service images.
+build:
+    @echo "Building gateway service images..."
+    docker compose build
+--- FILE_END: ./gateway/Makefile
+
+--- FILE_START: ./gateway/nginx/html/app.js
+--- CONTENT_START ---
+document.addEventListener('DOMContentLoaded', () => {
+    const chatDisplay = document.getElementById('chat-display');
+    const userQueryInput = document.getElementById('user-query');
+    const sendQueryButton = document.getElementById('send-query');
+    const contextFileUpload = document.getElementById('context-file-upload');
+    const uploadButton = document.getElementById('upload-button');
+    const uploadStatus = document.getElementById('upload-status');
+    const downloadLinksArea = document.getElementById('download-links');
+
+    // Function to add a message to the chat display
+    const addMessageToChat = (sender, message) => { 
+        const messageElement = document.createElement('div');
+        messageElement.classList.add('chat-message');
+        messageElement.classList.add(sender === 'user' ? 'user-message' : 'ai-message');
+        messageElement.innerHTML = `<strong>${sender === 'user' ? 'You' : 'AI'}:</strong> ${message}`;
+        chatDisplay.appendChild(messageElement);
+        chatDisplay.scrollTop = chatDisplay.scrollHeight; // Scroll to bottom
+    }; 
+
+    // Handle sending query
+    sendQueryButton.addEventListener('click', async () => {
+        const query = userQueryInput.value.trim();
+        if (query === '') {
+            return;
+        }
+
+        addMessageToChat('user', query);
+        userQueryInput.value = ''; // Clear input
+
+        try {
+            // Replace with your actual Flask RAG endpoint
+            const response = await fetch(`/app/chat/${encodeURIComponent(query)}`);
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            const data = await response.json();
+            addMessageToChat('ai', data.response || 'No specific response received.'); // Assuming Flask returns { "response": "..." }
+        } catch (error) {
+            console.error('Error fetching RAG response:', error);
+            addMessageToChat('ai', 'Error: Could not get a response. Please try again.');
+        }
+    });
+
+    // Allow sending query with Enter key (Shift + Enter for new line)
+    userQueryInput.addEventListener('keypress', (event) => {
+        if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault(); // Prevent new line
+            sendQueryButton.click();
+        }
+    });
+
+    // Handle file upload
+    uploadButton.addEventListener('click', async () => {
+        const file = contextFileUpload.files[0];
+        if (!file) {
+            uploadStatus.textContent = 'Please select a file to upload.';
+            uploadStatus.style.color = 'orange';
+            return;
+        }
+
+        uploadStatus.textContent = 'Uploading file...';
+        uploadStatus.style.color = 'blue';
+
+        const formData = new FormData();
+        formData.append('file', file); // 'file' should match the name Flask expects
+
+        try {
+            // Replace with your actual Flask file upload endpoint
+            const response = await fetch('/app/upload_context', {
+                method: 'POST',
+                body: formData,
+            });
+
+            if (response.ok) {
+                const result = await response.json();
+                uploadStatus.textContent = `Upload successful: ${result.message || file.name}`;
+                uploadStatus.style.color = 'green';
+                // Optionally, clear the file input after successful upload
+                contextFileUpload.value = '';
+                // Add a message to chat indicating file was used for context
+                addMessageToChat('system', `File "${file.name}" uploaded for context.`);
+            } else {
+                const errorData = await response.json();
+                throw new Error(`Upload failed: ${errorData.message || response.statusText}`);
+            }
+        } catch (error) {
+            console.error('Error uploading file:', error);
+            uploadStatus.textContent = `Upload failed: ${error.message}`;
+            uploadStatus.style.color = 'red';
+        }
+    });
+
+    // Placeholder for populating download links
+    // In a real application, Flask would provide an API endpoint (e.g., /app/get_download_list)
+    // that this frontend would call to get a list of available files to display.
+    // For now, this is just a comment to indicate where that logic would go.
+    function populateDownloadLinks(files) {
+        downloadLinksArea.innerHTML = ''; // Clear previous links
+        if (files && files.length > 0) {
+            files.forEach(file => {
+                const linkElement = document.createElement('p');
+                // Assuming Flask provides a download URL like /app/download/filename.ext
+                linkElement.innerHTML = `<a href="/app/download/${encodeURIComponent(file.filename)}" target="_blank">${file.display_name || file.filename}</a>`;
+                downloadLinksArea.appendChild(linkElement);
+            });
+        } else {
+            downloadLinksArea.innerHTML = '<p>No downloadable content available yet.</p>';
+        }
+    }
+
+    // Example of how you might call populateDownloadLinks later (e.g., after a RAG response generates a file)
+    // populateDownloadLinks([{ filename: 'generated_report.txt', display_name: 'Generated Report' }]);
+});
+--- FILE_END: ./gateway/nginx/html/app.js
+
+--- FILE_START: ./gateway/nginx/html/index.html
+--- CONTENT_START ---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Palantir Project RAG</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>QAD OpenEdge RAG Interface</h1>
+
+        <section class="chat-section">
+            <div class="chat-display" id="chat-display">
+                <p>Welcome! Ask me anything about your OpenEdge code.</p>
+            </div>
+            <div class="chat-input-area">
+                <textarea id="user-query" placeholder="Type your query here..." rows="3"></textarea>
+                <button id="send-query">Send Query</button>
+            </div>
+        </section>
+
+        <section class="file-upload-section">
+            <h2>Provide Context (Upload File)</h2>
+            <p>Upload a program or document to provide immediate context for your query.</p>
+            <input type="file" id="context-file-upload">
+            <button id="upload-button">Upload File</button>
+            <div id="upload-status" class="status-message"></div>
+        </section>
+
+        <section class="download-section">
+            <h2>Downloadable Content</h2>
+            <div id="download-links">
+                <p>No downloadable content available yet.</p>
+            </div>
+        </section>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
+--- FILE_END: ./gateway/nginx/html/index.html
+
+--- FILE_START: ./gateway/nginx/html/style.css
+--- CONTENT_START ---
+body {
+    font-family: Arial, sans-serif;
+    line-height: 1.6;
+    margin: 0;
+    padding: 20px;
+    background-color: #f4f4f4;
+    color: #333;
+}
+
+.container {
+    max-width: 900px;
+    margin: 20px auto;
+    background: #fff;
+    padding: 20px 30px;
+    border-radius: 8px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+}
+
+h1, h2 {
+    color: #0056b3;
+    text-align: center;
+    margin-bottom: 20px;
+}
+
+section {
+    margin-bottom: 30px;
+    padding: 15px;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    background-color: #f9f9f9;
+}
+
+/* Chat Section Styling */
+.chat-display {
+    height: 300px;
+    border: 1px solid #e0e0e0;
+    padding: 10px;
+    overflow-y: auto;
+    margin-bottom: 15px;
+    background-color: #fff;
+    border-radius: 5px;
+}
+
+.chat-message {
+    margin-bottom: 10px;
+    padding: 8px 12px;
+    border-radius: 15px;
+    max-width: 80%;
+    word-wrap: break-word;
+}
+
+.user-message {
+    background-color: #e6f7ff;
+    align-self: flex-end; /* Not directly used here, but good for flexbox layout */
+    margin-left: auto;
+    border-bottom-right-radius: 2px;
+}
+
+.ai-message {
+    background-color: #f0f0f0;
+    align-self: flex-start; /* Not directly used here */
+    margin-right: auto;
+    border-bottom-left-radius: 2px;
+}
+
+.system-message {
+    font-style: italic;
+    color: #666;
+    text-align: center;
+    margin-bottom: 10px;
+}
+
+.chat-input-area {
+    display: flex;
+    gap: 10px;
+}
+
+textarea#user-query {
+    flex-grow: 1;
+    padding: 10px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    resize: vertical;
+    min-height: 50px;
+    max-height: 150px;
+}
+
+button {
+    padding: 10px 20px;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 16px;
+    transition: background-color 0.2s ease;
+}
+
+button:hover {
+    background-color: #0056b3;
+}
+
+input[type="file"] {
+    padding: 8px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    background-color: #fff;
+}
+
+.file-upload-section button {
+    margin-left: 10px;
+}
+
+.status-message {
+    margin-top: 10px;
+    font-size: 0.9em;
+    font-weight: bold;
+}
+
+/* Download Section Styling */
+#download-links {
+    margin-top: 10px;
+    min-height: 50px;
+    border: 1px dashed #ccc;
+    padding: 10px;
+    border-radius: 5px;
+    background-color: #fff;
+}
+
+#download-links p {
+    margin: 5px 0;
+}
+
+#download-links a {
+    color: #007bff;
+    text-decoration: none;
+}
+
+#download-links a:hover {
+    text-decoration: underline;
+}
+--- FILE_END: ./gateway/nginx/html/style.css
+
+--- FILE_START: ./gateway/nginx/nginx.conf
+--- CONTENT_START ---
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+
+    sendfile        on;
+    keepalive_timeout  65;
+
+    server {
+        listen 80;
+        server_name localhost; # Can be your domain later if you have one
+
+        root /usr/share/nginx/html; # Default Nginx static files location
+        index index.html index.htm;
+
+        location / {
+            try_files $uri $uri/ =404; # Serve static files
+        }
+
+        # Flask Application Proxy
+        location /app/ {
+            proxy_pass http://app:5000/; 
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            rewrite ^/app/(.*)$ /$1 break; 
+        }
+    }
+}
+--- FILE_END: ./gateway/nginx/nginx.conf
+
+--- FILE_START: ./palproj/docker-compose.yml
+--- CONTENT_START ---
+# homelab/palproj/docker-compose.yml
+services:
+  app:
+    build: ./app
+    volumes:
+      - ./app:/app
+    networks:
+      - homelab_network # Use the external network
+    environment:
+      [cite_start]GOOGLE_API_KEY: ${GOOGLE_API_KEY} # References variable from .env 
+      # app_db connection details
+      APP_DB_HOST: app_db
+      APP_DB_NAME: palantir_app_db
+      APP_DB_USER: palantir_user
+      [cite_start]APP_DB_PASSWORD: ${DB_PASSWORD} # References variable from .env 
+      # vector_db connection details (for LangChain)
+      VECTOR_DB_HOST: vector_db
+      VECTOR_DB_NAME: palantir_vector_db
+      VECTOR_DB_USER: palantir_vector_user
+      [cite_start]VECTOR_DB_PASSWORD: ${VECTOR_DB_PASSWORD} # New variable from .env 
+    depends_on:
+      - app_db
+      - [cite_start]vector_db # App needs both databases 
+
+  app_db:
+    image: postgres:15-alpine
+    container_name: palantir_app_db
+    environment:
+      POSTGRES_DB: palantir_app_db
+      POSTGRES_USER: palantir_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - app_db_data:/var/lib/postgresql/data
+    networks:
+      - homelab_network # Use the external network
+    healthcheck:
+      [cite_start]test: ["CMD-SHELL", "pg_isready -U palantir_user -d palantir_app_db"] [cite: 7]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  vector_db:
+    [cite_start]image: pgvector/pgvector:pg16 # Using pgvector image for easier setup 
+    container_name: palantir_vector_db
+    environment:
+      POSTGRES_DB: palantir_vector_db
+      POSTGRES_USER: palantir_vector_user
+      [cite_start]POSTGRES_PASSWORD: ${VECTOR_DB_PASSWORD} # New variable from .env 
+    volumes:
+      - vector_db_data:/var/lib/postgresql/data
+    networks:
+      - homelab_network # Use the external network
+    healthcheck:
+      [cite_start]test: ["CMD-SHELL", "pg_isready -U palantir_vector_user -d palantir_vector_db"] [cite: 8]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  ingestion:
+    [cite_start]build: ./ingestion # We will create this directory and Dockerfile next 
+    volumes:
+      - [cite_start]./ingestion:/ingestion # Mount for live code changes 
+      - [cite_start]/home/damien/my_qad_code:/qad-code-repo:ro [cite: 9]
+    networks:
+      - homelab_network # Use the external network
+    environment:
+      [cite_start]GOOGLE_API_KEY: ${GOOGLE_API_KEY} # References variable from .env 
+      VECTOR_DB_HOST: vector_db
+      VECTOR_DB_NAME: palantir_vector_db
+      VECTOR_DB_USER: palantir_vector_user
+      VECTOR_DB_PASSWORD: ${VECTOR_DB_PASSWORD}
+      [cite_start]CODE_REPO_PATH: /qad-code-repo [cite: 9]
+    depends_on:
+      - [cite_start]vector_db # Ingestion needs the vector database 
+
+# This block tells Docker Compose to use the network
+# created by the gateway's compose file.
+networks:
+  homelab_network:
+    external: true
+
+volumes:
+  [cite_start]app_db_data: # Volume for Flask app's PostgreSQL data 
+  [cite_start]vector_db_data: # Volume for LLM vector database data
+--- FILE_END: ./palproj/docker-compose.yml
+
+--- FILE_START: ./palproj/ingestion/ingestion_script.py
+--- CONTENT_START ---
+import os
+import psycopg2
+from psycopg2.extras import execute_values
+import hashlib
+import re
+from tqdm import tqdm # For progress bar
+import sys 
+
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from dotenv import load_dotenv # To load environment variables from .env
+import logging
+
+# --- Configure Logging (Copy this block) ---
+log_level_str = os.getenv('LOG_LEVEL', 'INFO').upper()
+log_level = getattr(logging, log_level_str, logging.INFO)
+
+for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)
+
+logging.basicConfig(
+    level=log_level,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+# --- END Configure Logging ---
+
+# --- Configuration ---
+# Load environment variables from .env file (if not already loaded by Docker Compose)
+load_dotenv()
+
+# Database connection details for vector_db
+DB_HOST = os.environ.get("VECTOR_DB_HOST", "vector_db")
+DB_NAME = os.environ.get("VECTOR_DB_NAME", "palantir_vector_db")
+DB_USER = os.environ.get("VECTOR_DB_USER", "palantir_vector_user")
+DB_PASSWORD = os.environ.get("VECTOR_DB_PASSWORD")
+
+# Google API Key for Embeddings
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+if not GOOGLE_API_KEY or GOOGLE_API_KEY == "your_google_api_key_here":
+    print("ERROR: GOOGLE_API_KEY not set or is placeholder. Embedding generation will fail.")
+    exit(1) # Exit if API key is not valid
+
+# Path to the mounted QAD code repository inside the Docker container
+CODE_REPO_PATH = os.environ.get("CODE_REPO_PATH", "/qad-code-repo") # Default mount point
+
+# Initialize the Google Embeddings model
+embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
+
+# --- Database Setup and Connection ---
+def get_db_connection():
+    """Establishes and returns a database connection to vector_db."""
+    conn = None
+    try:
+        conn = psycopg2.connect(
+            host=DB_HOST,
+            database=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD
+        )
+        print("Successfully connected to vector_db.")
+        return conn
+    except Exception as e:
+        print(f"Error connecting to vector_db: {e}")
+        return None
+
+def create_embeddings_table(cursor):
+    """
+    Creates the 'code_embeddings' table if it doesn't exist.
+    This table will store our code chunks, metadata, and their embeddings.
+    """
+    try:
+        cursor.execute("""
+            CREATE EXTENSION IF NOT EXISTS vector;
+            CREATE TABLE IF NOT EXISTS code_embeddings (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                file_path TEXT NOT NULL,
+                procedure_name TEXT,
+                chunk_text TEXT NOT NULL,
+                chunk_hash TEXT NOT NULL UNIQUE, -- To prevent duplicate ingestion
+                embedding VECTOR(768), -- text-embedding-004 produces 768-dimensional embeddings
+                last_updated TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
+        """)
+        print("Ensured 'code_embeddings' table and 'vector' extension exist.")
+    except Exception as e:
+        print(f"Error creating table/extension: {e}")
+        raise # Re-raise to stop if table creation fails
+
+def clear_embeddings_table(cursor):
+    """Deletes all data from the code_embeddings table."""
+    try:
+        cursor.execute("TRUNCATE TABLE code_embeddings RESTART IDENTITY;")
+        print("Cleared existing data from 'code_embeddings' table.")
+    except Exception as e:
+        print(f"Error truncating table: {e}")
+        raise
+
+# --- OpenEdge Code Chunking Logic ---
+def chunk_openedge_code(file_content, file_path):
+    """
+    Splits OpenEdge ABL code into meaningful chunks (procedures/functions)
+    and extracts relevant metadata.
+    """
+    chunks = []
+    # Regex to find PROCEDURE or FUNCTION definitions (case-insensitive)
+    # It captures the name after PROCEDURE/FUNCTION
+    # It also handles variations like 'PROCEDURE PRIVATE', 'FUNCTION PUBLIC', etc.
+    # We use re.DOTALL to allow '.' to match newlines
+    procedure_regex = re.compile(
+        r'(?:PROCEDURE|FUNCTION)\s+(?:PRIVATE|PUBLIC|INTERNAL)?\s*([\w\-.]+)\s*(\(.*?\))?\s*:',
+        re.IGNORECASE | re.DOTALL
+    )
+
+    last_end = 0
+    for match in procedure_regex.finditer(file_content):
+        # Add the text before this procedure/function as a chunk if it exists
+        pre_code = file_content[last_end:match.start()].strip()
+        if pre_code:
+            chunks.append({
+                "file_path": file_path,
+                "procedure_name": "FILE_HEADER" if last_end == 0 else "INTER_PROCEDURE_CODE",
+                "chunk_text": pre_code
+            })
+
+        procedure_start = match.start()
+        procedure_name = match.group(1).strip()
+        # Find the end of the procedure/function
+        # This is a heuristic: look for 'END PROCEDURE' or 'END FUNCTION'
+        end_match = re.search(
+            r'(?:END\s+PROCEDURE|END\s+FUNCTION)\s*(\.|,|$)', # Capture . or , or end of string
+            file_content[procedure_start:],
+            re.IGNORECASE | re.DOTALL
+        )
+
+        chunk_end = len(file_content) # Default to end of file
+        if end_match:
+            # Add match.start() to convert relative index to absolute index in file_content
+            chunk_end = procedure_start + end_match.end()
+
+        chunk_text = file_content[procedure_start:chunk_end].strip()
+        if chunk_text:
+            chunks.append({
+                "file_path": file_path,
+                "procedure_name": procedure_name,
+                "chunk_text": chunk_text
+            })
+        last_end = chunk_end
+
+    # Add any remaining code after the last procedure/function
+    remaining_code = file_content[last_end:].strip()
+    if remaining_code:
+        chunks.append({
+            "file_path": file_path,
+            "procedure_name": "FILE_FOOTER",
+            "chunk_text": remaining_code
+        })
+
+    return chunks
+
+# --- Main Ingestion Logic ---
+def ingest_codebase():
+    """
+    Main function to orchestrate the code ingestion process.
+    Scans the mounted code repository, chunks OpenEdge files,
+    generates embeddings, and stores them in the vector database.
+    """
+    conn = get_db_connection()
+    if conn is None:
+        print("Cannot proceed without a database connection.")
+        return
+
+    try:
+        with conn.cursor() as cur:
+            create_embeddings_table(cur) # Ensure table exists first
+            clear_embeddings_table(cur)  # Clear existing data for a full re-ingestion
+
+            print(f"Starting code scanning in: {CODE_REPO_PATH}")
+            all_chunks_to_ingest = []
+            # Define explicitly allowed extensions like .p, .w, .t
+            explicit_extensions = ('.p', '.w', '.t')
+
+            for root, _, files in os.walk(CODE_REPO_PATH):
+                for file in files:
+                    file_lower = file.lower()
+                    # Get the file extension
+                    _, ext = os.path.splitext(file_lower)
+
+                    # Check if the extension is explicitly allowed OR if it starts with '.i'
+                    if ext in explicit_extensions or ext.startswith('.i'):
+                        file_path = os.path.join(root, file)
+                        relative_file_path = os.path.relpath(file_path, CODE_REPO_PATH)
+                        print(f"Processing file: {relative_file_path}")
+
+                        try:
+                            with open(file_path, 'r', encoding='latin-1') as f: # OpenEdge often uses latin-1
+                                file_content = f.read()
+
+                            chunks = chunk_openedge_code(file_content, relative_file_path)
+                            for chunk in chunks:
+                                # Generate a unique hash for the chunk content
+                                chunk_hash = hashlib.sha256(chunk["chunk_text"].encode('utf-8')).hexdigest()
+                                chunk["chunk_hash"] = chunk_hash
+                                all_chunks_to_ingest.append(chunk)
+
+                        except Exception as e:
+                            print(f"Error processing {relative_file_path}: {e}")
+                            continue
+
+            print(f"Generated {len(all_chunks_to_ingest)} chunks. Generating embeddings and inserting into DB...")
+
+            # Batching embeddings and insertions to optimize API calls and DB writes
+            batch_size = 50 # Adjust based on API limits and performance
+            for i in tqdm(range(0, len(all_chunks_to_ingest), batch_size), desc="Ingesting batches"):
+                batch_chunks = all_chunks_to_ingest[i:i + batch_size]
+                texts_to_embed = [chunk["chunk_text"] for chunk in batch_chunks]
+
+                try:
+                    # Generate embeddings for the batch
+                    embeddings_list = embeddings.embed_documents(texts_to_embed)
+
+                    # Prepare data for batch insertion
+                    values_to_insert = []
+                    for j, chunk in enumerate(batch_chunks):
+                        values_to_insert.append((
+                            chunk["file_path"],
+                            chunk.get("procedure_name"), # procedure_name might be None
+                            chunk["chunk_text"],
+                            chunk["chunk_hash"],
+                            embeddings_list[j] # Assign the corresponding embedding from the list
+                        ))
+
+                    # Batch insert into the database
+                    query = """
+                        INSERT INTO code_embeddings (file_path, procedure_name, chunk_text, chunk_hash, embedding)
+                        VALUES %s
+                        ON CONFLICT (chunk_hash) DO NOTHING; -- Prevents re-inserting identical chunks
+                    """
+                    execute_values(cur, query, values_to_insert, page_size=batch_size)
+                    conn.commit() # Commit after each batch
+                except Exception as e:
+                    print(f"\nError during batch ingestion (batch {i}-{i+batch_size}): {e}")
+                    conn.rollback() # Rollback the current batch on error
+                    # Consider more robust error handling: retry, log and continue, etc.
+
+            print("Ingestion process completed.")
+
+    except Exception as e:
+        conn.rollback() # Rollback any changes on error if main process fails
+        print(f"An error occurred during ingestion: {e}")
+    finally:
+        if conn:
+            conn.close()
+            print("Database connection closed.")
+
+# --- Script Execution ---
+if __name__ == '__main__':
+    print("Starting code ingestion script...")
+    ingest_codebase()
+    print("Ingestion script finished.")
+--- FILE_END: ./palproj/ingestion/ingestion_script.py
+
+--- FILE_START: ./palproj/ingestion/requirements.txt
+--- CONTENT_START ---
+psycopg2-binary
+tqdm
+langchain-google-genai
+python-dotenv
+--- FILE_END: ./palproj/ingestion/requirements.txt
+
+--- FILE_START: ./palproj/ingestion/Dockerfile
+--- CONTENT_START ---
+# Use a lightweight Python base image
+FROM python:3.10-slim-bookworm
+
+# Set the working directory
+WORKDIR /ingestion
+
+# Copy requirements.txt and install dependencies FIRST for better Docker caching
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the current directory into the container (which will be empty for now)
+COPY . .
+
+# We won't define a CMD yet, as ingestion will be run manually or via a cron job
+# CMD ["python", "ingestion_script.py"]
+--- FILE_END: ./palproj/ingestion/Dockerfile
+
+--- FILE_START: ./palproj/Makefile
+--- CONTENT_START ---
+# homelab/palproj/Makefile
+.PHONY: up down logs restart status build
+
+up:
+    @echo "Starting Palantir application services..."
+    docker compose up --build -d
+
+down:
+    @echo "Stopping Palantir application services..."
+    docker compose down -v
+
+logs:
+    @echo "Tailing Palantir application logs..."
+    docker compose logs -f
+
+restart: down up
+
+status:
+    @echo "Checking status of Palantir application services..."
+    docker compose ps
+
+build:
+    @echo "Building Palantir application service images..."
+    docker compose build
+--- FILE_END: ./palproj/Makefile
+
+--- FILE_START: ./palproj/.git/index
+--- CONTENT_START ---
+DIRC      hSûK(&¾hSûK'õ¢X   S  ¤  è  è   Ö$×°(U+ê½ûì2Ôš1¬ |ĞÑ 
+.gitignore        hSúZ*^0hSúZÙİ   É  ¤  è  è  DÕƒıW”V}Ú1ƒò(ƒC3“òÓ AI_CONTEXT.md     hSò+Œ5bhSò+|ó+   Á  ¤  è  è  ,©äï€~îkì
+Ut@N•ÂÊ¿xMş app/Dockerfile    hSòM*Ú×ÅhSòM*`Æ    p  ¤  è  è  N¹Ìr1~dì³.ãË±T app/main.py       hM#dÂ1ÃhM#dÂ1Ã   Z  ¤           )„AYtD§â…m|LáUP÷›Ú app/migrations/README     hM#d}hM#d}   \  ¤          YìEÂjkµNƒ?ÔæÎ-â“C‰OK app/migrations/alembic.ini        hM#dÂ1ÃhM#dÂ1Ã   Y  ¤          L—	'/ò‚q±<)»¥Å€ş ¬ app/migrations/env.py     hM#d¿OhM#d¿O   ]  ¤          î,V0:óÿÜèwe¿€ö¾¤¥ app/migrations/script.py.mako     hM#tÚ,ÔhM#tÚ,Ô   c  ¤          Âİ+~üûŒŠù¹>| »më Bapp/migrations/versions/290eb81a6e68_initial_chat_history_table.py        hR£
+/`ßhR£
+/BZ}   ¼  ¤  è  è   Õ¥,ˆ
+òÉpzº'f¨ºK{	 app/requirements.txt      hQK 5ß;ùhQK 5Ïù¶   ;  ¤  è  è  ¡„8c«f_ä7÷~ë&gm#¯–¼ docker-compose.yml        hRÍá)8¶DhRÍá)1¿   B  í  è  è  ˜lçT;Ò ®«íä{siß]x dump_project.sh   hQD„±uhQDuo/   D,  ¤  è  è  äÖ’Íÿ²ù}‰š€–vq”2öŞ1 ingestion/Dockerfile      hQP¯;4çqhQP¯;%¥7   D-  ¤  è  è  ([ú÷û7£LR22ĞÌü5iÇÔ“ ingestion/ingestion_script.py     hQH­=i¦hQH­=i¦   yÙ  ¤  è  è   :äÑÿîÁ¿B¯iÁÌı9n×¨ ingestion/requirements.txt        hRĞl
+Ü	^hRĞl
+½„Ù     ¤  è  è  ‘\dÿ“Ãª$µ+pÅœ:prô1 nginx/html/app.js hR%šhR%ŠÎA   8  ¤  è  è  ‘G·È±«^ qİ jE2£Ø”¶Š nginx/html/index.html     hRfôĞïhRfÖLp   Ú  ¤  è  è  	Ç:%]¦a _”6m”xyü«úÂó nginx/html/style.css      hRÒ\3{ÒÆhRÒ\3]NF   A  ¤  è  è  gß‡oÑT;gnyÄûsu¨Ñà nginx/nginx.conf  TREE   × 19 3
+±S;‹fñ@¬®f¡©Süe?Pgˆapp 8 1
+~>1ö€³¿$O:;leeG+Õmigrations 5 1
+‘ÅõÛdO™"}&Õ’/;ÃĞversions 1 0
+œ¤âz|0	°(·òzV¾¤–¶nginx 4 1
+RJásMFd4à/Ph²]FW:html 3 0
+ÉÈm6RÚèƒâ!‘Ö¹Ñ2Íingestion 3 0
+Pğ€Œ ŞĞ«ÇUÁt_BPC=oKí ~ààIMÙ$m^;OÒ{--- FILE_END: ./palproj/.git/index
+
+--- FILE_START: ./palproj/.git/ORIG_HEAD
+--- CONTENT_START ---
+f752467e3bab0d21486ef9513f0fde46103e1db0
+--- FILE_END: ./palproj/.git/ORIG_HEAD
+
+--- FILE_START: ./palproj/.git/description
+--- CONTENT_START ---
+Unnamed repository; edit this file 'description' to name the repository.
+--- FILE_END: ./palproj/.git/description
+
+--- FILE_START: ./palproj/.git/hooks/pre-rebase.sample
+--- CONTENT_START ---
+#!/bin/sh
+#
+# Copyright (c) 2006, 2008 Junio C Hamano
+#
+# The "pre-rebase" hook is run just before "git rebase" starts doing
+# its job, and can prevent the command from running by exiting with
+# non-zero status.
+#
+# The hook is called with the following parameters:
+#
+# $1 -- the upstream the series was forked from.
+# $2 -- the branch being rebased (or empty when rebasing the current branch).
+#
+# This sample shows how to prevent topic branches that are already
+# merged to 'next' branch from getting rebased, because allowing it
+# would result in rebasing already published history.
+
+publish=next
+basebranch="$1"
+if test "$#" = 2
+then
+	topic="refs/heads/$2"
+else
+	topic=`git symbolic-ref HEAD` ||
+	exit 0 ;# we do not interrupt rebasing detached HEAD
+fi
+
+case "$topic" in
+refs/heads/??/*)
+	;;
+*)
+	exit 0 ;# we do not interrupt others.
+	;;
+esac
+
+# Now we are dealing with a topic branch being rebased
+# on top of master.  Is it OK to rebase it?
+
+# Does the topic really exist?
+git show-ref -q "$topic" || {
+	echo >&2 "No such branch $topic"
+	exit 1
+}
+
+# Is topic fully merged to master?
+not_in_master=`git rev-list --pretty=oneline ^master "$topic"`
+if test -z "$not_in_master"
+then
+	echo >&2 "$topic is fully merged to master; better remove it."
+	exit 1 ;# we could allow it, but there is no point.
+fi
+
+# Is topic ever merged to next?  If so you should not be rebasing it.
+only_next_1=`git rev-list ^master "^$topic" ${publish} | sort`
+only_next_2=`git rev-list ^master           ${publish} | sort`
+if test "$only_next_1" = "$only_next_2"
+then
+	not_in_topic=`git rev-list "^$topic" master`
+	if test -z "$not_in_topic"
+	then
+		echo >&2 "$topic is already up to date with master"
+		exit 1 ;# we could allow it, but there is no point.
+	else
+		exit 0
+	fi
+else
+	not_in_next=`git rev-list --pretty=oneline ^${publish} "$topic"`
+	/usr/bin/perl -e '
+		my $topic = $ARGV[0];
+		my $msg = "* $topic has commits already merged to public branch:\n";
+		my (%not_in_next) = map {
+			/^([0-9a-f]+) /;
+			($1 => 1);
+		} split(/\n/, $ARGV[1]);
+		for my $elem (map {
+				/^([0-9a-f]+) (.*)$/;
+				[$1 => $2];
+			} split(/\n/, $ARGV[2])) {
+			if (!exists $not_in_next{$elem->[0]}) {
+				if ($msg) {
+					print STDERR $msg;
+					undef $msg;
+				}
+				print STDERR " $elem->[1]\n";
+			}
+		}
+	' "$topic" "$not_in_next" "$not_in_master"
+	exit 1
+fi
+
+<<\DOC_END
+
+This sample hook safeguards topic branches that have been
+published from being rewound.
+
+The workflow assumed here is:
+
+ * Once a topic branch forks from "master", "master" is never
+   merged into it again (either directly or indirectly).
+
+ * Once a topic branch is fully cooked and merged into "master",
+   it is deleted.  If you need to build on top of it to correct
+   earlier mistakes, a new topic branch is created by forking at
+   the tip of the "master".  This is not strictly necessary, but
+   it makes it easier to keep your history simple.
+
+ * Whenever you need to test or publish your changes to topic
+   branches, merge them into "next" branch.
+
+The script, being an example, hardcodes the publish branch name
+to be "next", but it is trivial to make it configurable via
+$GIT_DIR/config mechanism.
+
+With this workflow, you would want to know:
+
+(1) ... if a topic branch has ever been merged to "next".  Young
+    topic branches can have stupid mistakes you would rather
+    clean up before publishing, and things that have not been
+    merged into other branches can be easily rebased without
+    affecting other people.  But once it is published, you would
+    not want to rewind it.
+
+(2) ... if a topic branch has been fully merged to "master".
+    Then you can delete it.  More importantly, you should not
+    build on top of it -- other people may already want to
+    change things related to the topic as patches against your
+    "master", so if you need further changes, it is better to
+    fork the topic (perhaps with the same name) afresh from the
+    tip of "master".
+
+Let's look at this example:
+
+		   o---o---o---o---o---o---o---o---o---o "next"
+		  /       /           /           /
+		 /   a---a---b A     /           /
+		/   /               /           /
+	       /   /   c---c---c---c B         /
+	      /   /   /             \         /
+	     /   /   /   b---b C     \       /
+	    /   /   /   /             \     /
+    ---o---o---o---o---o---o---o---o---o---o---o "master"
+
+
+A, B and C are topic branches.
+
+ * A has one fix since it was merged up to "next".
+
+ * B has finished.  It has been fully merged up to "master" and "next",
+   and is ready to be deleted.
+
+ * C has not merged to "next" at all.
+
+We would want to allow C to be rebased, refuse A, and encourage
+B to be deleted.
+
+To compute (1):
+
+	git rev-list ^master ^topic next
+	git rev-list ^master        next
+
+	if these match, topic has not merged in next at all.
+
+To compute (2):
+
+	git rev-list master..topic
+
+	if this is empty, it is fully merged to "master".
+
+DOC_END
+--- FILE_END: ./palproj/.git/hooks/pre-rebase.sample
+
+--- FILE_START: ./palproj/.git/hooks/commit-msg.sample
+--- CONTENT_START ---
+#!/bin/sh
+#
+# An example hook script to check the commit log message.
+# Called by "git commit" with one argument, the name of the file
+# that has the commit message.  The hook should exit with non-zero
+# status after issuing an appropriate message if it wants to stop the
+# commit.  The hook is allowed to edit the commit message file.
+#
+# To enable this hook, rename this file to "commit-msg".
+
+# Uncomment the below to add a Signed-off-by line to the message.
+# Doing this in a hook is a bad idea in general, but the prepare-commit-msg
+# hook is more suited to it.
+#
+# SOB=$(git var GIT_AUTHOR_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+# grep -qs "^$SOB" "$1" || echo "$SOB" >> "$1"
+
+# This example catches duplicate Signed-off-by lines.
+
+test "" = "$(grep '^Signed-off-by: ' "$1" |
+	 sort | uniq -c | sed -e '/^[ 	]*1[ 	]/d')" || {
+	echo >&2 Duplicate Signed-off-by lines.
+	exit 1
+}
+--- FILE_END: ./palproj/.git/hooks/commit-msg.sample
+
+--- FILE_START: ./palproj/.git/hooks/pre-receive.sample
+--- CONTENT_START ---
+#!/bin/sh
+#
+# An example hook script to make use of push options.
+# The example simply echoes all push options that start with 'echoback='
+# and rejects all pushes when the "reject" push option is used.
+#
+# To enable this hook, rename this file to "pre-receive".
+
+if test -n "$GIT_PUSH_OPTION_COUNT"
+then
+	i=0
+	while test "$i" -lt "$GIT_PUSH_OPTION_COUNT"
+	do
+		eval "value=\$GIT_PUSH_OPTION_$i"
+		case "$value" in
+		echoback=*)
+			echo "echo from the pre-receive-hook: ${value#*=}" >&2
+			;;
+		reject)
+			exit 1
+		esac
+		i=$((i + 1))
+	done
+fi
+--- FILE_END: ./palproj/.git/hooks/pre-receive.sample
+
+--- FILE_START: ./palproj/.git/hooks/prepare-commit-msg.sample
+--- CONTENT_START ---
+#!/bin/sh
+#
+# An example hook script to prepare the commit log message.
+# Called by "git commit" with the name of the file that has the
+# commit message, followed by the description of the commit
+# message's source.  The hook's purpose is to edit the commit
+# message file.  If the hook fails with a non-zero status,
+# the commit is aborted.
+#
+# To enable this hook, rename this file to "prepare-commit-msg".
+
+# This hook includes three examples. The first one removes the
+# "# Please enter the commit message..." help message.
+#
+# The second includes the output of "git diff --name-status -r"
+# into the message, just before the "git status" output.  It is
+# commented because it doesn't cope with --amend or with squashed
+# commits.
+#
+# The third example adds a Signed-off-by line to the message, that can
+# still be edited.  This is rarely a good idea.
+
+COMMIT_MSG_FILE=$1
+COMMIT_SOURCE=$2
+SHA1=$3
+
+/usr/bin/perl -i.bak -ne 'print unless(m/^. Please enter the commit message/..m/^#$/)' "$COMMIT_MSG_FILE"
+
+# case "$COMMIT_SOURCE,$SHA1" in
+#  ,|template,)
+#    /usr/bin/perl -i.bak -pe '
+#       print "\n" . `git diff --cached --name-status -r`
+# 	 if /^#/ && $first++ == 0' "$COMMIT_MSG_FILE" ;;
+#  *) ;;
+# esac
+
+# SOB=$(git var GIT_COMMITTER_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+# git interpret-trailers --in-place --trailer "$SOB" "$COMMIT_MSG_FILE"
+# if test -z "$COMMIT_SOURCE"
+# then
+#   /usr/bin/perl -i.bak -pe 'print "\n" if !$first_line++' "$COMMIT_MSG_FILE"
+# fi
+--- FILE_END: ./palproj/.git/hooks/prepare-commit-msg.sample
+
+--- FILE_START: ./palproj/.git/hooks/pre-push.sample
+--- CONTENT_START ---
+#!/bin/sh
+
+# An example hook script to verify what is about to be pushed.  Called by "git
+# push" after it has checked the remote status, but before anything has been
+# pushed.  If this script exits with a non-zero status nothing will be pushed.
+#
+# This hook is called with the following parameters:
+#
+# $1 -- Name of the remote to which the push is being done
+# $2 -- URL to which the push is being done
+#
+# If pushing without using a named remote those arguments will be equal.
+#
+# Information about the commits which are being pushed is supplied as lines to
+# the standard input in the form:
+#
+#   <local ref> <local oid> <remote ref> <remote oid>
+#
+# This sample shows how to prevent push of commits where the log message starts
+# with "WIP" (work in progress).
+
+remote="$1"
+url="$2"
+
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+
+while read local_ref local_oid remote_ref remote_oid
+do
+	if test "$local_oid" = "$zero"
+	then
+		# Handle delete
+		:
+	else
+		if test "$remote_oid" = "$zero"
+		then
+			# New branch, examine all commits
+			range="$local_oid"
+		else
+			# Update to existing branch, examine new commits
+			range="$remote_oid..$local_oid"
+		fi
+
+		# Check for WIP commit
+		commit=$(git rev-list -n 1 --grep '^WIP' "$range")
+		if test -n "$commit"
+		then
+			echo >&2 "Found WIP commit in $local_ref, not pushing"
+			exit 1
+		fi
+	fi
+done
+
+exit 0
+--- FILE_END: ./palproj/.git/hooks/pre-push.sample
+
+--- FILE_START: ./palproj/.git/hooks/pre-commit.sample
+--- CONTENT_START ---
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git commit" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message if
+# it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-commit".
+
+if git rev-parse --verify HEAD >/dev/null 2>&1
+then
+	against=HEAD
+else
+	# Initial commit: diff against an empty tree object
+	against=$(git hash-object -t tree /dev/null)
+fi
+
+# If you want to allow non-ASCII filenames set this variable to true.
+allownonascii=$(git config --type=bool hooks.allownonascii)
+
+# Redirect output to stderr.
+exec 1>&2
+
+# Cross platform projects tend to avoid non-ASCII filenames; prevent
+# them from being added to the repository. We exploit the fact that the
+# printable range starts at the space character and ends with tilde.
+if [ "$allownonascii" != "true" ] &&
+	# Note that the use of brackets around a tr range is ok here, (it's
+	# even required, for portability to Solaris 10's /usr/bin/tr), since
+	# the square bracket bytes happen to fall in the designated range.
+	test $(git diff-index --cached --name-only --diff-filter=A -z $against |
+	  LC_ALL=C tr -d '[ -~]\0' | wc -c) != 0
+then
+	cat <<\EOF
+Error: Attempt to add a non-ASCII file name.
+
+This can cause problems if you want to work with people on other platforms.
+
+To be portable it is advisable to rename the file.
+
+If you know what you are doing you can disable this check using:
+
+  git config hooks.allownonascii true
+EOF
+	exit 1
+fi
+
+# If there are whitespace errors, print the offending file names and fail.
+exec git diff-index --check --cached $against --
+--- FILE_END: ./palproj/.git/hooks/pre-commit.sample
+
+--- FILE_START: ./palproj/.git/hooks/push-to-checkout.sample
+--- CONTENT_START ---
+#!/bin/sh
+
+# An example hook script to update a checked-out tree on a git push.
+#
+# This hook is invoked by git-receive-pack(1) when it reacts to git
+# push and updates reference(s) in its repository, and when the push
+# tries to update the branch that is currently checked out and the
+# receive.denyCurrentBranch configuration variable is set to
+# updateInstead.
+#
+# By default, such a push is refused if the working tree and the index
+# of the remote repository has any difference from the currently
+# checked out commit; when both the working tree and the index match
+# the current commit, they are updated to match the newly pushed tip
+# of the branch. This hook is to be used to override the default
+# behaviour; however the code below reimplements the default behaviour
+# as a starting point for convenient modification.
+#
+# The hook receives the commit with which the tip of the current
+# branch is going to be updated:
+commit=$1
+
+# It can exit with a non-zero status to refuse the push (when it does
+# so, it must not modify the index or the working tree).
+die () {
+	echo >&2 "$*"
+	exit 1
+}
+
+# Or it can make any necessary changes to the working tree and to the
+# index to bring them to the desired state when the tip of the current
+# branch is updated to the new commit, and exit with a zero status.
+#
+# For example, the hook can simply run git read-tree -u -m HEAD "$1"
+# in order to emulate git fetch that is run in the reverse direction
+# with git push, as the two-tree form of git read-tree -u -m is
+# essentially the same as git switch or git checkout that switches
+# branches while keeping the local changes in the working tree that do
+# not interfere with the difference between the branches.
+
+# The below is a more-or-less exact translation to shell of the C code
+# for the default behaviour for git's push-to-checkout hook defined in
+# the push_to_deploy() function in builtin/receive-pack.c.
+#
+# Note that the hook will be executed from the repository directory,
+# not from the working tree, so if you want to perform operations on
+# the working tree, you will have to adapt your code accordingly, e.g.
+# by adding "cd .." or using relative paths.
+
+if ! git update-index -q --ignore-submodules --refresh
+then
+	die "Up-to-date check failed"
+fi
+
+if ! git diff-files --quiet --ignore-submodules --
+then
+	die "Working directory has unstaged changes"
+fi
+
+# This is a rough translation of:
+#
+#   head_has_history() ? "HEAD" : EMPTY_TREE_SHA1_HEX
+if git cat-file -e HEAD 2>/dev/null
+then
+	head=HEAD
+else
+	head=$(git hash-object -t tree --stdin </dev/null)
+fi
+
+if ! git diff-index --quiet --cached --ignore-submodules $head --
+then
+	die "Working directory has staged changes"
+fi
+
+if ! git read-tree -u -m "$commit"
+then
+	die "Could not update working tree to new HEAD"
+fi
+--- FILE_END: ./palproj/.git/hooks/push-to-checkout.sample
+
+--- FILE_START: ./palproj/.git/hooks/update.sample
+--- CONTENT_START ---
+#!/bin/sh
+#
+# An example hook script to block unannotated tags from entering.
+# Called by "git receive-pack" with arguments: refname sha1-old sha1-new
+#
+# To enable this hook, rename this file to "update".
+#
+# Config
+# ------
+# hooks.allowunannotated
+#   This boolean sets whether unannotated tags will be allowed into the
+#   repository.  By default they won't be.
+# hooks.allowdeletetag
+#   This boolean sets whether deleting tags will be allowed in the
+#   repository.  By default they won't be.
+# hooks.allowmodifytag
+#   This boolean sets whether a tag may be modified after creation. By default
+#   it won't be.
+# hooks.allowdeletebranch
+#   This boolean sets whether deleting branches will be allowed in the
+#   repository.  By default they won't be.
+# hooks.denycreatebranch
+#   This boolean sets whether remotely creating branches will be denied
+#   in the repository.  By default this is allowed.
+#
+
+# --- Command line
+refname="$1"
+oldrev="$2"
+newrev="$3"
+
+# --- Safety check
+if [ -z "$GIT_DIR" ]; then
+	echo "Don't run this script from the command line." >&2
+	echo " (if you want, you could supply GIT_DIR then run" >&2
+	echo "  $0 <ref> <oldrev> <newrev>)" >&2
+	exit 1
+fi
+
+if [ -z "$refname" -o -z "$oldrev" -o -z "$newrev" ]; then
+	echo "usage: $0 <ref> <oldrev> <newrev>" >&2
+	exit 1
+fi
+
+# --- Config
+allowunannotated=$(git config --type=bool hooks.allowunannotated)
+allowdeletebranch=$(git config --type=bool hooks.allowdeletebranch)
+denycreatebranch=$(git config --type=bool hooks.denycreatebranch)
+allowdeletetag=$(git config --type=bool hooks.allowdeletetag)
+allowmodifytag=$(git config --type=bool hooks.allowmodifytag)
+
+# check for no description
+projectdesc=$(sed -e '1q' "$GIT_DIR/description")
+case "$projectdesc" in
+"Unnamed repository"* | "")
+	echo "*** Project description file hasn't been set" >&2
+	exit 1
+	;;
+esac
+
+# --- Check types
+# if $newrev is 0000...0000, it's a commit to delete a ref.
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+if [ "$newrev" = "$zero" ]; then
+	newrev_type=delete
+else
+	newrev_type=$(git cat-file -t $newrev)
+fi
+
+case "$refname","$newrev_type" in
+	refs/tags/*,commit)
+		# un-annotated tag
+		short_refname=${refname##refs/tags/}
+		if [ "$allowunannotated" != "true" ]; then
+			echo "*** The un-annotated tag, $short_refname, is not allowed in this repository" >&2
+			echo "*** Use 'git tag [ -a | -s ]' for tags you want to propagate." >&2
+			exit 1
+		fi
+		;;
+	refs/tags/*,delete)
+		# delete tag
+		if [ "$allowdeletetag" != "true" ]; then
+			echo "*** Deleting a tag is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/tags/*,tag)
+		# annotated tag
+		if [ "$allowmodifytag" != "true" ] && git rev-parse $refname > /dev/null 2>&1
+		then
+			echo "*** Tag '$refname' already exists." >&2
+			echo "*** Modifying a tag is not allowed in this repository." >&2
+			exit 1
+		fi
+		;;
+	refs/heads/*,commit)
+		# branch
+		if [ "$oldrev" = "$zero" -a "$denycreatebranch" = "true" ]; then
+			echo "*** Creating a branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/heads/*,delete)
+		# delete branch
+		if [ "$allowdeletebranch" != "true" ]; then
+			echo "*** Deleting a branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/remotes/*,commit)
+		# tracking branch
+		;;
+	refs/remotes/*,delete)
+		# delete tracking branch
+		if [ "$allowdeletebranch" != "true" ]; then
+			echo "*** Deleting a tracking branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	*)
+		# Anything else (is there anything else?)
+		echo "*** Update hook: unknown type of update to ref $refname of type $newrev_type" >&2
+		exit 1
+		;;
+esac
+
+# --- Finished
+exit 0
+--- FILE_END: ./palproj/.git/hooks/update.sample
+
+--- FILE_START: ./palproj/.git/hooks/pre-applypatch.sample
+--- CONTENT_START ---
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed
+# by applypatch from an e-mail message.
+#
+# The hook should exit with non-zero status after issuing an
+# appropriate message if it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-applypatch".
+
+. git-sh-setup
+precommit="$(git rev-parse --git-path hooks/pre-commit)"
+test -x "$precommit" && exec "$precommit" ${1+"$@"}
+:
+--- FILE_END: ./palproj/.git/hooks/pre-applypatch.sample
+
+--- FILE_START: ./palproj/.git/hooks/pre-merge-commit.sample
+--- CONTENT_START ---
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git merge" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message to
+# stderr if it wants to stop the merge commit.
+#
+# To enable this hook, rename this file to "pre-merge-commit".
+
+. git-sh-setup
+test -x "$GIT_DIR/hooks/pre-commit" &&
+        exec "$GIT_DIR/hooks/pre-commit"
+:
+--- FILE_END: ./palproj/.git/hooks/pre-merge-commit.sample
+
+--- FILE_START: ./palproj/.git/hooks/sendemail-validate.sample
+--- CONTENT_START ---
+#!/bin/sh
+
+# An example hook script to validate a patch (and/or patch series) before
+# sending it via email.
+#
+# The hook should exit with non-zero status after issuing an appropriate
+# message if it wants to prevent the email(s) from being sent.
+#
+# To enable this hook, rename this file to "sendemail-validate".
+#
+# By default, it will only check that the patch(es) can be applied on top of
+# the default upstream branch without conflicts in a secondary worktree. After
+# validation (successful or not) of the last patch of a series, the worktree
+# will be deleted.
+#
+# The following config variables can be set to change the default remote and
+# remote ref that are used to apply the patches against:
+#
+#   sendemail.validateRemote (default: origin)
+#   sendemail.validateRemoteRef (default: HEAD)
+#
+# Replace the TODO placeholders with appropriate checks according to your
+# needs.
+
+validate_cover_letter () {
+	file="$1"
+	# TODO: Replace with appropriate checks (e.g. spell checking).
+	true
+}
+
+validate_patch () {
+	file="$1"
+	# Ensure that the patch applies without conflicts.
+	git am -3 "$file" || return
+	# TODO: Replace with appropriate checks for this patch
+	# (e.g. checkpatch.pl).
+	true
+}
+
+validate_series () {
+	# TODO: Replace with appropriate checks for the whole series
+	# (e.g. quick build, coding style checks, etc.).
+	true
+}
+
+# main -------------------------------------------------------------------------
+
+if test "$GIT_SENDEMAIL_FILE_COUNTER" = 1
+then
+	remote=$(git config --default origin --get sendemail.validateRemote) &&
+	ref=$(git config --default HEAD --get sendemail.validateRemoteRef) &&
+	worktree=$(mktemp --tmpdir -d sendemail-validate.XXXXXXX) &&
+	git worktree add -fd --checkout "$worktree" "refs/remotes/$remote/$ref" &&
+	git config --replace-all sendemail.validateWorktree "$worktree"
+else
+	worktree=$(git config --get sendemail.validateWorktree)
+fi || {
+	echo "sendemail-validate: error: failed to prepare worktree" >&2
+	exit 1
+}
+
+unset GIT_DIR GIT_WORK_TREE
+cd "$worktree" &&
+
+if grep -q "^diff --git " "$1"
+then
+	validate_patch "$1"
+else
+	validate_cover_letter "$1"
+fi &&
+
+if test "$GIT_SENDEMAIL_FILE_COUNTER" = "$GIT_SENDEMAIL_FILE_TOTAL"
+then
+	git config --unset-all sendemail.validateWorktree &&
+	trap 'git worktree remove -ff "$worktree"' EXIT &&
+	validate_series
+fi
+--- FILE_END: ./palproj/.git/hooks/sendemail-validate.sample
+
+--- FILE_START: ./palproj/.git/hooks/applypatch-msg.sample
+--- CONTENT_START ---
+#!/bin/sh
+#
+# An example hook script to check the commit log message taken by
+# applypatch from an e-mail message.
+#
+# The hook should exit with non-zero status after issuing an
+# appropriate message if it wants to stop the commit.  The hook is
+# allowed to edit the commit message file.
+#
+# To enable this hook, rename this file to "applypatch-msg".
+
+. git-sh-setup
+commitmsg="$(git rev-parse --git-path hooks/commit-msg)"
+test -x "$commitmsg" && exec "$commitmsg" ${1+"$@"}
+:
+--- FILE_END: ./palproj/.git/hooks/applypatch-msg.sample
+
+--- FILE_START: ./palproj/.git/hooks/fsmonitor-watchman.sample
+--- CONTENT_START ---
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use IPC::Open2;
+
+# An example hook script to integrate Watchman
+# (https://facebook.github.io/watchman/) with git to speed up detecting
+# new and modified files.
+#
+# The hook is passed a version (currently 2) and last update token
+# formatted as a string and outputs to stdout a new update token and
+# all files that have been modified since the update token. Paths must
+# be relative to the root of the working tree and separated by a single NUL.
+#
+# To enable this hook, rename this file to "query-watchman" and set
+# 'git config core.fsmonitor .git/hooks/query-watchman'
+#
+my ($version, $last_update_token) = @ARGV;
+
+# Uncomment for debugging
+# print STDERR "$0 $version $last_update_token\n";
+
+# Check the hook interface version
+if ($version ne 2) {
+	die "Unsupported query-fsmonitor hook version '$version'.\n" .
+	    "Falling back to scanning...\n";
+}
+
+my $git_work_tree = get_working_dir();
+
+my $retry = 1;
+
+my $json_pkg;
+eval {
+	require JSON::XS;
+	$json_pkg = "JSON::XS";
+	1;
+} or do {
+	require JSON::PP;
+	$json_pkg = "JSON::PP";
+};
+
+launch_watchman();
+
+sub launch_watchman {
+	my $o = watchman_query();
+	if (is_work_tree_watched($o)) {
+		output_result($o->{clock}, @{$o->{files}});
+	}
+}
+
+sub output_result {
+	my ($clockid, @files) = @_;
+
+	# Uncomment for debugging watchman output
+	# open (my $fh, ">", ".git/watchman-output.out");
+	# binmode $fh, ":utf8";
+	# print $fh "$clockid\n@files\n";
+	# close $fh;
+
+	binmode STDOUT, ":utf8";
+	print $clockid;
+	print "\0";
+	local $, = "\0";
+	print @files;
+}
+
+sub watchman_clock {
+	my $response = qx/watchman clock "$git_work_tree"/;
+	die "Failed to get clock id on '$git_work_tree'.\n" .
+		"Falling back to scanning...\n" if $? != 0;
+
+	return $json_pkg->new->utf8->decode($response);
+}
+
+sub watchman_query {
+	my $pid = open2(\*CHLD_OUT, \*CHLD_IN, 'watchman -j --no-pretty')
+	or die "open2() failed: $!\n" .
+	"Falling back to scanning...\n";
+
+	# In the query expression below we're asking for names of files that
+	# changed since $last_update_token but not from the .git folder.
+	#
+	# To accomplish this, we're using the "since" generator to use the
+	# recency index to select candidate nodes and "fields" to limit the
+	# output to file names only. Then we're using the "expression" term to
+	# further constrain the results.
+	my $last_update_line = "";
+	if (substr($last_update_token, 0, 1) eq "c") {
+		$last_update_token = "\"$last_update_token\"";
+		$last_update_line = qq[\n"since": $last_update_token,];
+	}
+	my $query = <<"	END";
+		["query", "$git_work_tree", {$last_update_line
+			"fields": ["name"],
+			"expression": ["not", ["dirname", ".git"]]
+		}]
+	END
+
+	# Uncomment for debugging the watchman query
+	# open (my $fh, ">", ".git/watchman-query.json");
+	# print $fh $query;
+	# close $fh;
+
+	print CHLD_IN $query;
+	close CHLD_IN;
+	my $response = do {local $/; <CHLD_OUT>};
+
+	# Uncomment for debugging the watch response
+	# open ($fh, ">", ".git/watchman-response.json");
+	# print $fh $response;
+	# close $fh;
+
+	die "Watchman: command returned no output.\n" .
+	"Falling back to scanning...\n" if $response eq "";
+	die "Watchman: command returned invalid output: $response\n" .
+	"Falling back to scanning...\n" unless $response =~ /^\{/;
+
+	return $json_pkg->new->utf8->decode($response);
+}
+
+sub is_work_tree_watched {
+	my ($output) = @_;
+	my $error = $output->{error};
+	if ($retry > 0 and $error and $error =~ m/unable to resolve root .* directory (.*) is not watched/) {
+		$retry--;
+		my $response = qx/watchman watch "$git_work_tree"/;
+		die "Failed to make watchman watch '$git_work_tree'.\n" .
+		    "Falling back to scanning...\n" if $? != 0;
+		$output = $json_pkg->new->utf8->decode($response);
+		$error = $output->{error};
+		die "Watchman: $error.\n" .
+		"Falling back to scanning...\n" if $error;
+
+		# Uncomment for debugging watchman output
+		# open (my $fh, ">", ".git/watchman-output.out");
+		# close $fh;
+
+		# Watchman will always return all files on the first query so
+		# return the fast "everything is dirty" flag to git and do the
+		# Watchman query just to get it over with now so we won't pay
+		# the cost in git to look up each individual file.
+		my $o = watchman_clock();
+		$error = $output->{error};
+
+		die "Watchman: $error.\n" .
+		"Falling back to scanning...\n" if $error;
+
+		output_result($o->{clock}, ("/"));
+		$last_update_token = $o->{clock};
+
+		eval { launch_watchman() };
+		return 0;
+	}
+
+	die "Watchman: $error.\n" .
+	"Falling back to scanning...\n" if $error;
+
+	return 1;
+}
+
+sub get_working_dir {
+	my $working_dir;
+	if ($^O =~ 'msys' || $^O =~ 'cygwin') {
+		$working_dir = Win32::GetCwd();
+		$working_dir =~ tr/\\/\//;
+	} else {
+		require Cwd;
+		$working_dir = Cwd::cwd();
+	}
+
+	return $working_dir;
+}
+--- FILE_END: ./palproj/.git/hooks/fsmonitor-watchman.sample
+
+--- FILE_START: ./palproj/.git/hooks/post-update.sample
+--- CONTENT_START ---
+#!/bin/sh
+#
+# An example hook script to prepare a packed repository for use over
+# dumb transports.
+#
+# To enable this hook, rename this file to "post-update".
+
+exec git update-server-info
+--- FILE_END: ./palproj/.git/hooks/post-update.sample
+
+--- FILE_START: ./palproj/.git/refs/remotes/origin/main
+--- CONTENT_START ---
+0c53a7ef6e5043333cd536663d0a29dfc4e60747
+--- FILE_END: ./palproj/.git/refs/remotes/origin/main
+
+--- FILE_START: ./palproj/.git/refs/heads/main
+--- CONTENT_START ---
+dc5a2d69a307d9500c6c3f6e04cd7fd7238988d4
+--- FILE_END: ./palproj/.git/refs/heads/main
+
+--- FILE_START: ./palproj/.git/HEAD
+--- CONTENT_START ---
+ref: refs/heads/main
+--- FILE_END: ./palproj/.git/HEAD
+
+--- FILE_START: ./palproj/.git/objects/df/876fd190543b671f6e79c40bfb73758ea8d1e0
+--- CONTENT_START ---
+x•SMk1íÙ¿b {h¶ÖÅiC–JKh/Å´—œ*äÕ¸+¬•–Ñ¬?(şïÕì:vRB :1zïÍ¼iåã
+n>Ì_á'ø3¼v‘6Hº!`Í.†óòİ¢š'“†¹;Á\¨}oQyµ®Å:LÕ bqmzÏZB ¦ë¼«ˆ©X3ò41¡i«É NìÚù-ˆaÙ vÆ»-jÎò±g€÷×gm‘NµHŞ%Æ 7åÈ•PBÁè`Zkã›˜¸‚+øl¬±'°±5.€7œåÜZ‚Ğ˜-æ*p,O¤(FÕ'R©1„*üva¯n½è}İÂw‰Bâì´q”†¼â{0*J.XÜûLø—ãÉ™€¤ZazäP.˜z.zr ›‚‹r!eü¿OÒŸ³æÙ	]ÖÜy“6ğé2XRÜÎˆKö<¸+èª;“Èk¸U*ƒn¯Ë²Tœ%$ÑˆLÈºAcsw¿æöC1áeàıô?ı¶„‚°ŒÚXK—Á>«~?½‹´3dÑÊ	Š1fê½^?\Éé?„–9B‘ê[|Ê#Ü‘c„_Ò õzööMª˜Ã*¿ìÍ£V¯Çü}şÔ÷Á--- FILE_END: ./palproj/.git/objects/df/876fd190543b671f6e79c40bfb73758ea8d1e0
+
+--- FILE_START: ./palproj/.git/objects/ee/163270265e2e153a92e2c68570aa318b9fb92c
+--- CONTENT_START ---
+xu‘_OÂ0Å}î§¸¯vÎ^xå!GFˆãC·hXï­m˜ŸŞv(1³‡í®çœşzZ6TÂh8ºÀÆIà¥aÕù=!”"üRZì$lÉ‚Ó¢idx«OÉæE¾ÓëÆÃô>ãÑÈK¢Ã‘¬fl kéÁï%„ù pµ²²òd;PèT-ûÅŠĞ…Ò²ç¼xœ.
+¸ÆDû„L×K¬ühƒUKô¶ª	HèéÊ=ÉW¯ğ[™ú“‡4-Ğù şs¨Z‰µÄJIÇŠÍe"Q¯á‰W¢ÚKpÛ?™WhÎm¡£ÖBànT%¼
+ÍUÎ÷fzæš…~cE†¬?‡Ìá1
+*0ÛÍ^Vùz£,ËÎûk-°†ĞBÄ„‹ï‚ĞºXúC‹ª"‹l²œÂ[²û“[H8/Öñ+Kûgóã¬ÃŒCòÎ¾ ‰±µ…--- FILE_END: ./palproj/.git/objects/ee/163270265e2e153a92e2c68570aa318b9fb92c
+
+--- FILE_START: ./palproj/.git/objects/1b/1ba70dbfe8679429af4f148367707471891d5d
+--- CONTENT_START ---
+x+)JMU026`040031QĞKÏ,ÉLÏË/Je(¸ÆUöÕÔ H'éÙ·®M†vSÍ¡ª=ãııB\#BôrS\=SßÌ}9Kõ}jÿÙÒ¿ökùš BbAÃ9•¬û{˜â—¼²¿{ZÏáçåù,PcRò“³S‹t“ósò‹Sõ*ssRr­¦T‡Ögib®ìğ™™r{Ãm jsSS…”ÒÜ‚ø‚¢ü¬Ôä½â†ãw>™<ºÿák›L÷µÇW	ut†X›—™WÁĞn¯{f×\fß­õvû….ß/p rÃ_--- FILE_END: ./palproj/.git/objects/1b/1ba70dbfe8679429af4f148367707471891d5d
+
+--- FILE_START: ./palproj/.git/objects/ce/34246adfbc025fa4ea3fddcb2e40f9d4239f04
+--- CONTENT_START ---
+x+)JMU044g040031QpÉOÎN-JËÌIex'fT §'j5éÑ±Ö‚U†İówê@Uå&fæéT2¼=ò¦x*‡knõÃ³öZ'W^‘©‡*)J-,Í,JÍMÍ+)Ö+©(a¨ÛRĞsLôâ§®;23lÎÿÓ}Ğ# 51--- FILE_END: ./palproj/.git/objects/ce/34246adfbc025fa4ea3fddcb2e40f9d4239f04
+
+--- FILE_START: ./palproj/.git/objects/4c/9709271b2ff28271b13c29bba5c50b80fea0ac
+--- CONTENT_START ---
+xVmoÛ6Şgÿ
+"Ca¹p•é§`¾º¢ëºOA!PÒÙb#‘*I%qı#©w]L°‹¼;ŞËsÏ±lM)..?ÿIu½±^´æpPú°Ú[Ó/yeô^DÙ«–^†•UÛ·ÒİŒ»Õ`-i_È¾OÛ²¥®TÕ$`´§{¿Zı,|£œÀÇ7$®’T´,Lù…*¿wªÑ[s«jrĞ‘UE*&hİÊv 'îLé°’+­»(°08ÊWÉûÀ>9…Ã¼Å‚í-ù šƒòŞXñáè£§,@ş;Ü*MÂ‘wbèÃ&Y'JéT%Ûö˜¯æüdÑb:°àBË6+N3Y±›ŒÈ¿kÙ:å+'}»Ş¬V«šöÛiT†²ÍåJàñöÿğKJå±71â×äÙŸ¼»j«†ºã¯BêYæ7ö4a]D?X-uË‘$ÒNí®×:Xéiı9¯Ë|éF0@÷õ^dŸ=½¶ÖØ­¸òŞªrğñ=yû8'Û]ü/·bfş‘ªb°íÓ•B^F“C6pk²…t…Cú5 ]ÑKçÙz÷F¶6ê[YQ6¹ÊÁ­Ÿ¬·øy‚ŠñkÊËi.æz%pJö½³ı…IÆª¬kq4ƒ©©];ñ;yùJz™zE4d	rŒÜµ¼9¦P:á†››7¹­»#šslÇîìaÏKËÎt0[³ÙÃ^şB¢ÆõÔO9: è¤Ò…é= ’­İ×VF°q2‘9´X‰Í*Q—0şÀqÜì`Ejôà?ÓEì¬­@s )jQCk¢Ú	³h¼?n¡_I-Jo|”¥úKİ±ˆ\&ATÑ}v(pZÀø2®³HŸm`%ÏsA¾Ê¸s4¢NíE#DGdSè€É(æÖ‹öH˜˜ä¦„»ë÷FÓç€«JNØA±c¹{³ß3[îœ}´˜˜#×Ih€…h¿èbB‚M)gúd+¾Î)şúø.È3·hƒ-^šÚBÅ‡f^a¢gòî½,[
+ZŒX!ÁXÔ¶¹/Âİ¨¾Gç…£%QY’Œ° rG¢6zíİ’\nxñêÅÕ‡·<¸Î·Rµ|BŠä%H9ŒDØŸî©;e›Ğ0lÙÿ Øblü4^Â‰®²
+gß>E"Ãpş pN˜áÌnLÉyÖvø"u§¸[¶e¶ÙbalÉ¶(•®İî“b:1,ø†Ó1%ahŞJídút¹Ñ—SÔdãĞ9].Œ~–‚Ì	”Şò\Fí]EZZePíX7Ô+”5Qüg,rM¥0wP]x©q bh,.ÊTÓäA\Ê
+wÌhˆà(LyÔ7 ”ÉñÙÔ‘KbÔ”Y'kw Áü?ğÕğ¸‘úÀïÇ©LÒ–öÔ]ŠÆûşòü|åß¾}«LüàÜºsÒç-¢sş¼2æ¦Ä7o|‡2Ï{\xøšSÀiÅƒ¸¨Á]ÈÁ-9¾T0·˜Üq,8í.ªòpùD°åUW3İ9PĞÉ€ØŠ8ÚæÅ8JÀß-¬_ÿiˆ·ùÁQ*z\0,Mïrå
+êzi'ÊÆßÙÓëËÏèëSƒ,ïF¸ÇíM¶~?§\ÓÒ÷HÕ9ßX…ã+Ğ4îQs%f¼T‚2Ùà	=P³‹IyNØ¤}ı &‡ü€å)<“Äç)ÊÉÑ>
+ñı’ÿƒÒ@¦é 9ñnqóEä3é¤ô¥ÛÍÚÛpoóó”t"ûôé”i=¹Î¦F÷ƒGòKÃT<%£ÀQ±haKc¬à+Ëˆ¼S¥QÊ„›\LÏ÷"‰äVç\U--- FILE_END: ./palproj/.git/objects/4c/9709271b2ff28271b13c29bba5c50b80fea0ac
+
+--- FILE_START: ./palproj/.git/objects/2c/0156303a8df3ffdc9de87765bf801bf6bea4a5
+--- CONTENT_START ---
+x]ËNÃ0EYû+F¡‹VªXuC%¨İ°å";´–üÂ“€ªgœÓà…å¹sæq­lPpx><TUµÉB¼ã§!<¼°úX§EçRÖuøò%ßĞçäŞâ”Pvg¾2×La­9äæ<K´)82Cê D±¼èÃJÛ\Ñİ@›aÎ˜vÁ	ĞBUqÇGø]ŒFß™Ö`¢=ô„Ô^çAO¢`/¼UÂ˜¶wÖv£X*ĞJfL%é›km¥â `+9wÃˆ^SÍÿX˜?ÁH}¼$©q»;
+à“¿{&³å=»’(;
+óZÿJ‹4ßE«ò‡O®[--- FILE_END: ./palproj/.git/objects/2c/0156303a8df3ffdc9de87765bf801bf6bea4a5
+
+--- FILE_START: ./palproj/.git/objects/2c/a92f0bb3d502b783dbc0c5c04bc91c8b364cd1
+--- CONTENT_START ---
+x]UKOGÎyEŒ‚“\É7´€AÙÅÈ»†H–=3µ³zº&ıX¼şõùªg%ˆéz|¯¢vRÓşş×/_7Û‹Ï[Z~ºÛ^ı³ı¶XÜpà“HQz&ñXßQ#>ñ÷D¦–œ¨?Òä_nğßRä”‡‹EUİOı(Æ}¨*ÚpJZ<¤ÕjM§+:¦•ñ]6øe--»3Ì!C{Ø›fo=ÓN¢xã(G.“Z>°“¡gŸŞ—y’©­³éH›Lâîˆ¹‹ŠtÛ›p¤y—­û˜€Æ(6h+;êm‡R‹’ççy‡ø¾4ZsÚK+NJoº:p8&ìØÑ³ujİÙKKk0ø£M7¹zå¦åÁÉßrÔŠªº”æ‰C!Ô gˆUU (9›dR#€e0İqª4 "cº¸¿¥'>‚´È4ÇiÕëœà½3^é_›#íŒnÜÂ“Æ¸_ãç5hh‹8½Š1‚Æíúk»s`Š¹ÌÛe‡ÕéÇ	åF!»süÀ+‰Nïeyö²½Âw|ÑK™¾v&>‘g›‘{‡©hölÓ¾Xd¹G…ËWåéÊl¯.˜ÅÖÕ-%<)Õj)O_êìS¦R†‘Ö“»NÖg²÷óKrfH2Œà¢ñ¢ù/Û /'·¿xò¶º?v.æà"ç”·~LL!7E£wtY¬ñÅ`3ö˜5|œ<–öŒv£¥÷Ó4QRÀi]YDw°°Äå‘k¨ÏJŒv,xár@‡dÏãG¥JÛ¿0o¸ÉÙÒê¦S–Nr»sNÓ”Î]âôšN½Ğk(K·÷dÚVôş>ˆ®µ&Úé6¹g§¤Äş(&)úN„ ÅÈ³ÅA˜#2EKwÒ{5İ^}'ß’ô€ª)—¨
+R.×—„«òCkçßÆH´‘o“)ô*_évJŒc¦Ù„Âøµ4s®«êo„w5¹lÕƒãôCiX3Ò¥šËÎ6VÇ”X¼¹/§`tNxXªÅµ°_<ÆÄ}$gŸ˜>/7 ·ù$.ÄD‹G…ÎrjnOz½¯¥şä`O¨§„ÉÖn3ª"y°ä%‘7^‹Å×«»Ë×ÿYW'I--- FILE_END: ./palproj/.git/objects/2c/a92f0bb3d502b783dbc0c5c04bc91c8b364cd1
+
+--- FILE_START: ./palproj/.git/objects/87/3f2dccba9d034dd0c13b2ebb4e55a7b06f10df
+--- CONTENT_START ---
+x+)JMU0³d01 …Œ’Üç?ík¶.ıò5Ê}ú•Ù×îweüŞeh``fb¢—™W¡—œŸ—Ætq²µ§ßºcE®ËV­şÒzğ) ¨{ ¾--- FILE_END: ./palproj/.git/objects/87/3f2dccba9d034dd0c13b2ebb4e55a7b06f10df
+
+--- FILE_START: ./palproj/.git/objects/0c/53a7ef6e5043333cd536663d0a29dfc4e60747
+--- CONTENT_START ---
+xM
+Â0F]ç³J¦ÉLqá	¼A~¦ÚEIÓ…··xßîñøàKu]—£ÁSo"‘¼öSŒHDÖ²AÂ¬­ŸÅ#fïòÔ;4)ŒÄ2±ÃÑ	3šèS¶2z+f$Š„³È^…½¿jƒ{X)ğø„—ü“[;$mCªëö+àDY[ëàŒZku„ãc—ÿÖj)OÙúRäZD}=ĞG°--- FILE_END: ./palproj/.git/objects/0c/53a7ef6e5043333cd536663d0a29dfc4e60747
+
+--- FILE_START: ./palproj/.git/objects/50/f0808c200bded0abc755c19d745f4250433d0f
+--- CONTENT_START ---
+x+)JMU04²d040031QpÉOÎN-JËÌIe¸6éìÿM?k;g5ÌVV8ÅèÛ=Ãz¨ªÌ¼ôÔâ’Ìü¼øâä¢Ì‚½‚J†_ßš/æö	22ºpæiæñ+}“¡Ê‹RK3‹RsSóJŠõJ*J\üÿîà~'¶õ™åÏüµÌ»¾‚ Cv;--- FILE_END: ./palproj/.git/objects/50/f0808c200bded0abc755c19d745f4250433d0f
+
+--- FILE_START: ./palproj/.git/objects/00/afcc67c50da172c23320f01db33b9122bd3961
+--- CONTENT_START ---
+xœİr#Gr…}§("$A‚ú™µ7xã 8wg†É‘¼±á6&Ğbu7È¡.?Ã^úéöIüÌªî‡ëµ½±!‘ º*+ÿÎÉ¬lİ”ÕMøæŸ÷ò›øóåÕÑÅU8>{uò¯Wÿ6½Éëü«&4Õ2Õj^«y˜V«6ÿÔ†ì¦Ú´aùÖuõK>åƒÕ,4y»YF»»çñÓª¬<Üİ—yÛêñÍš/†·oß…ñÛ¬çám¶šo2~xWÍòr‡}BÚq™MÅ*·UÖyİT«¬›&·fù}^Vëe¾j'¶_U·ÙMQíc¸lë¬Íçì;Ú’¥XfõcH²\U!_5›:¤ÎÙ*ÏX¶ºËbÎ£2´UXåI†fb½ËÛE5«ÊÊÖ'÷yıØ"ã<<en$óŠ³ÌÂ}‘±ñEûfsÃé¥›Y¾.«Gş¶iôÄîî«jz—×¦ĞŒsÖÍî®EÊ¹l³vÓø7uÍ1ËÇødÆAªy™‡£óÓp—?š‚ôP6æMõõ¦ÕÏËl%õ¿ËZY5E:K‘…²šfåi|ÿ5ÌÌ8KÃ·Xt^³¾–{“İç¡ÙØ~·›Ñ¦Õr]æ-gòˆêvŸÿã+Ó|İ†ñyu¼ÓI¯ã—ù~ÃZÒôë2kîB¶^—ÅÔu_àa²‹=íÂ\äxL=¯zË‡“Õ}QW+yA2vWRş\ÕwRµ\j>ÜlVí&üTÔíGz½küÓ»PoV«ôÍPfë¶ZûáŸ¨ñhúë¦¨õÍèíOcŞ™äGfsŞ&¯ñ3Ò¤(±œ®në¬iëÍÔlôexe®1<ÅÀ¥¯‘løsô±v‘³œ»ô¢jÚ¸	¡$ÀÓê¼4A$CKøQ~Îo°~.ÅhE;/^ÎÑ1ÙƒÿQªÒòƒ#øÃ—ùtS[zú-¨³¹´p\V›Ùm™áiŠÒ´J¿Æ«*¬77X6œ‡l6“uÁ’ZWr¸YQ“@p¢ÛºZ>İ'z!iÇ¢¤øÍœÄìBÏ	!…H-É¤|4»õ~ÖD#•ôa(§<æ©º²Ìõ¡%«ü¦g	çi;mFÈO‰“ô2Ÿ­ˆvlíÌÓyV›Æ_WÓ×»»$xß¦¿Õy¦S½ÏQ	†)õ[ğ&'ºdóê¶˜ÚÆÂb_Æ‡™²rËíéªœá~ÍcÓæË&”Å]./Q&¹ù›bš‚/™:-Õœ~µT~µç¿º/¾
+stØ¹X¹·¢Y¼/ÂªjÃ*[U£ÉjzÖJ5£o&èw8&T+dmÂ—áj‘uˆF‘k7`Ä{<èSã–ÉÑÂ…\‹TL®ùô¸3ÅGd³áa8ZgÚ.~å»¾.á1Ï'£‹ªÌÙŸL)ú±ÚÔÃtÀ!&ğ°ß¦äƒÀ›ôªºœ…1®Ô{ûÎ$œÊ
+x€zhÈ×8ùmQæM¿¹z÷v/_^î…?\îôş­àÌ•X‹(õ³bÖO{ò¨‡¬ÉÏf«lÉj„ßúu“7h0É?K—“Ñkíz8ZI¡®2	‚Ìke{¥÷ê–	¿à ²p”é‡šÚ‰OÛ{Æúg1ßD@T,m‰,IÊäÙ35è“¡"öÂååÛPÜ‚¤9éçsáú@PNnÀçá Ïöú™Œv
+Ô·Ù4ç÷SY•Oæ¨Daú¶šÓ¿á'}ü‡›MQFûf!nkzøÜWpSö¯ú
+hÉ†½ñXEoÊÈœpO!+H–Îk¢h½i÷øç‘lc›¥8.ñ¡Æ+P›OwX]Tõ2˜Ì¬5qwâƒ=ËdŒåfeˆä)4ÎA0üòÇ·a–A—ä–#Yˆ‘¶ªûÃ	K`ùp%ÿ|ùÃ©{}íyåíSÕ stD°|Ëgù-ü¦Uä1²ÃÌõ­À~ igZn,
+”t8´œ
+ê”¯fùŠä×x€*,@åÜfÒ~jñ-íúôã0.9U“¬½&Oá@1FÏ5vr›Çiµ»S¬ Œ{áœ¯ÎØşø§½·ÓIÜI1Y?Z^hŠeîı 5ˆyLÙƒÈÛ1­Pã«C½Š†úÿ%ÃêVİ¬¸åî—Ø…<“E¹QàFÎ"gæÉºÙøË;·…‘­Ce S¬ä©Né¶S—%KiD²ó›«Ç5+6i9Jûœü<w ÁØ«£~‰åMãcYÏC“QÒ©’CŸâœÄ`Í´.Ö¸Îê(b_ÁFR÷}Un€°Àa©wŒêç=÷è(»;fÆñ!Â a“O—Ğo'á¬.Ha1µZ"ˆ§2ÜlrğñpA„hâq„y@!x’*%ªàÔú™]™Q.¥BÏ[U;f”uVÜ¿D²`pi2Ë§"wÑ?’{Z@748µÿŠz!LÓ†§¥UŞ‚§w[=mYL]*÷gúCªÜ¶Y€šnê| ÎïRU«P4•S`ìÌùøyÏÄˆd1¬j‰X5eT}”m2ú¨$½œ‰é”Ø‘—‡JMBœ^@¾…ÜÒºc_'PL­.õ
+›‚kóÉ|B=Ö¶ëÃƒƒ[GI‡¿ÿúë¯w,•ûI“ÔÑağmÓì$¤tÜy‹R`Ş—7²g7nóœ\Q Û/!6íˆøT:Î0‰Ùé£’•çµxÿ”Ôï¦ø;''PRÍ¯åÇÙÍáï^~÷íÿâØxWI‡Âô¦5tc%È¤ô9¡8¨eå#«VÃÙŠL Ùœ(vbÁM5¿ÿ:Œån/_~gàøæêêg§#¤¢…ZüX[,Ñ™Aáëy°ÛdÒ¹‘Hµ†4ÚN5”(uJhÃ$m¤£“ÑKv_vÉQcÏ·üÁäuJÛ‹ŠÉÙòZ‡íê²ñÃ¢˜.†>Ì9‡^CW¦VN&Ã´TÊy)RÇéÃB}€a7‰´Şv§ªËUAtÖ¨Ñ@Æ¸±³(åKã9ˆèÅ¦éåÕ«êR<ª%t‰=ÀñO"ğ¢š,ƒ-™{©ªCîNizÁÈøœR3Ò×Éèw“Kıcjœ®,¢I¥öˆxèê=õSo7RbÅ¸jŒgMge™-3©.o6s+˜_‹ÇZs%Jgı‡j)bc*ôOe…Œ‚˜u¦^HŠ÷Î›¢"<­ãÆZd4x­-ËB«-ß3Ä±}­ıc²w?IAöe¹üóÔá7ß¼üî¥Å†qGé¤Í3ë­E–
+r‹¹ÄN¼»ËóuDq]×D—­eZq¢ÍGŒB†b+‘¶^ì˜H|²à¿$ğŸ|ÊÔ’‘âg£¿şå¿şú—ÿàÿbğúõ?Cı‡ŠÀçİÿ¾ß‹ŸF!?×®Şg‹}F<}½/ó2ØÏN\²“!=lŞ‰€gy÷ğ_âÙÆî&ş-6HGÍO5ŞêG¯Ç"uåá¤‹Ÿ^)iµAX¥ù¢O–=_¬6™¹ó•
+ÿ§ÿû"XU æIhîåşÍ,èÂ^øøqı8¥%—ü¸3XøsşÔ­ÿm3¯+ä6Ô	w8’®eåé‰±°b:áÑéÇØà,gİböÃÁ®@Àƒ2FF†¬¯­,tO„ªx_ó^ŠÿnŒù9ä­ÎrdPa>!N6+Ø±J'ÕZ&+©g.Ô¢¾P‰“sv…¨7M¬LÊaIÖäÎgì5kè¶!'‘å
+j"/ŒhÑÙù`ßql+Š§H­53™ğ+€äÇ£Wï}X©{3æWQÔíQ
+õrwÒ ùÃd«s‰m†)ÚŸèšjø+Ì@
+³4HDN;¸Úğ1€@ÿWQ½È¨éÏ7µ:'ø0-Ä†L.Š+p@Ïà!7«Ù~exî°d cÂr"#ƒMW‰-ÑÆ14CPjÖ·ûOd¤|URZÉ–·8éÅ5ó„ƒ¶ì…xpS#w¨0 ¾_¬ì4Î¥'Şè@†S—ÁÑÛœ`«cU{Ä[JéHºkiõªN†7EÂ
+şRÄó‘1ûÓíŸªL	¬:Ï“‹SgÙ€wY)wSÛ?õ†öü“ğÙfv—Z¿šøÃÆjwoĞæC&u&lÓAÍ¬¯zÂº+ñ:A<«:üv%©!7½—~3o'˜µºD›ÊòÉè ­ê'gñ [ÏıÃ“›“ıÙ3nBÈÆë|ZàGòêÎ-‹ß9å…îˆX$6ytâØ[ĞµVCCXecjÒ¯¨Bk­òåM>SÓ„¾‘KÕ@Ùb§æÅÉŒ¶™à#Â05±Ç4^r·ªÈ&|¡ëéoÀódÄ’±Ó–útG½¶O/æ áó&k§‹}L†7p<œ)©”m)B×\E€İ’ÎR¨Ù`3N«ßÈVJ%\”ÔÊı]wbÏˆe•ÙÈÙëÿæßÕi:Cšsv]G7ùàLnÛ@BĞÜÖ‚ş”Âqp2‹ÀÄdÍ#é$Wuå>ç‘ñ­÷±%—ù ßg4\ìZ!â^CóËn–jHpz=ùC¾„/ËL	stóH†ì•½ŸÜÍÂ
+eè8³7@(H«‡Ãğ†¦œ áX7ßÛMCcøğÇÎ/Æ	Hjş÷ytÇå–…änŠH,G^L‹ ¤Ö–1¦wTnêêZ:³z]6¥~¥›”ëIùÉfj[pçIn,>dÀÌ¹ßR¼w^k\NIeı‰¾ç›¸¯a»íF%³&Nˆ­Û[¨å©Ù:*D
+.´*üWŒ\ÉÓqÙ–øØè’Ó7¥E}.rÀ¬PƒUÕ|©SËDwâ€Ÿ]ß„I¯¨uÿ ³²¡«»Åb<÷Ğú0a¬ED‚«—EÜ¼Ş`¾…Èìò4Åı0Ö
+S3³‚q„¾B…}Bˆ¨ß!¶6&Ô
+øq›P»Ğ¶±Æ½!îÃÁîN™SnmÃ/Õbƒ?èPÄÓ¢ªî(ğ´+]ìØ5)ºm¬÷”Xµ÷èPWÍ½FLšâs–ëÜŒúE	GPnñ–^îÂ4•İĞ,Øc¦Ÿ¯ïÍŸıõĞ;ŒÌÔ(õûåpã^U.¦ì~A‘¤?~)RLÄÏŞM‰'á
+ĞÒìcîÒÙ1fáy±œcOàÛÕ„ü§¡ùqû(\õtbeùØš:Ú:#Ä&&¢‰—À·YTf‘“{C€MıÉÓ÷Ço?¼:@iÉA±Ôñb³Ò»B¾$7ø,²›%9/§AŞä¸ÙÁğo™g¢>Ì„S-ÔL^x•Èø—Ka²ŸÑVÃ›Á%ñG‰ûoÃùÅÙñÉ«'{áõ‡÷ÇW§gïÍÑº|h’ŞPÙŞ”°nÁŒRU]ÿA+©Â˜°¸O¬^h¤a2b$3B“IW:æµ¯ñhgó:Ó^o…eú6Çãq=`±bı>À’X.«!p&"ç¿gá¶ÌÄmĞ@nD¦hiåX3S÷&T<aN>‚Œ–x‡VÛ˜¾-dq9Wê¬¥?ïwºÿõ×/5góŒ&N8½c±Œc‹™ê¼&ÚŸÜÉèú›£ôÅS#Ş•ÄÚÁ´)£P¸.ÖêÎÁ³9Æ„‹åŠAz¢]jU]må¡9H¥æ®J‚uO„±aP?1 f0‘$káè-‰n:#éØÜU±]oÈd^‡cı"ÂlîÀÔ½>:=¸ÛIà$F°:Ò°Ìßc2:Û´òTµîsºo\¬©a¡ÚHÑëĞ¤M5hâB¨ª±·£)¿)àcÛ`àXúíaøqÃŒùê"o(MÁ×ñ)ÎoÎš%½š9ÊñCjğ¼r$r\¹ó¥ Q[*SchT¾»ìÆ{l13
+ölV) )bOÒ'~7†Õä«÷—8°rPÎr—·æ/fk8R¿Q/ú>~ˆÛ1˜b[¦¤¨G÷ÍfûôÂ¸"_2Ğ?ƒwhkïŞâ…}½h^"zjÎçêaNl’y}·##“%>ÃØ”‚,ä•pîUTxµ—
+b¨BAZ$°·DÍŸ„Ÿ¥÷şs,b}Zé?rÖ#¸
+äëúLFÂÛE‚(%³®@gtÄñ®‹v°'ódô3ôùÒœÆöG³VÌ¡şíN.yX'YšÏÀ754ŒÌÃôh„¤ËèdŠar©‡òi²h—=¡DÈr¸HÚ&ŠªÑ+HüÀ†qLm ¤u”mY=.˜Àcóz2ú ÷Pó§”Åô­ñge'ãhÉ :¸Âï"2Ä(ú±öY…?W5#<‰anî×°X›G(ÈĞÀßÏfšù°kòy.¸=:$i¢âOiÒYµAƒ5-øÆ"ÂXÒ6ºÃêÓ›7x9ÁÄ ™0+‘s €ëZzßÈÀD1£ºà™Œ	*$œ¸´t÷:H¯é®@WjìEcw	ÜeÒ>ıw9åg…x{›?%n;Ib€e—Ìë˜ñç8(À€C¼Áˆ·&‰Jˆ/“øÚ (Ëèd%Ÿ-íŠ(ı Ë‹iIƒ¬i_H“ÚÔ5Ø=¦iŠ+$<t˜Ò¹f„·¦ÒzŒA†÷ÿÃQdq(ä,ÍLX¸CÕDs1Š‡Y ŒN¨¬õc¦ªåÆ“}	YQQ»®ä¾"ïğ{‰#£ÛŞo¥Tµd„ÃxEQœŒÄ=Ú}Î.‘á`æå2°-S»ó…b$JRÓ@êÉ‹®T±tÍ3Ú•şŠBÌ•\Ñ8–d7"±zçôbX#ah³½*Rl^éq¯úÓsl¤z#êãy!å_hÊ9Ö=s§ƒt%©¶‰q\'õ»mN+yO={ Wu¢7¦3‘ö•ÚÚÌ"êÒÊ¹Ğ"/×bùŒ?(n1ÚcUAŸVÓlƒ¾ü¹ÿ¼* úL3ŞøÀRò<ˆŞÆĞw¶Ò(ûşI„¤St3óİ¥â®Ñaå`7A·`IPqml(£Î€|<~Í¡+é‰²±ã
+i8‹Sy%¥F¡ö³ºª\¤n9u¯`ÙÇ…‡½9³©ÏıÌ[VË"Û-P¹ç^1Äx›ˆn€umì< |ërsdZË…RöCVŞ¥sÑ; å(,t5à²‚ûmµÏ¿¼Ã¤F’N¼’&Û@øŒÇšÓ4¥5YTUµáv¼âÖ@u<ôÅÎaİ¡†=‰·Û›š4ıÇÑèÏ'ïi[u/+Œ^_ğsĞ‡çoŞÎîTÌEÇ­ª™"<¢Á†Q|¯ÄmZt›;/aÂPÑğ'edß¢šâ9Yù¨3Í.ÜÍ¦¼³D­4Î©SÓI<˜î ·¢J$Ğ×µ}¥ä˜hTä¸U²ÑG’DzD{êÒG#hòÁ¾‘—BÓ¾Äi.~ ÂÌğ9*u Úƒ½*á<éëz£
+/uj»A£-cÈŒR-GAn%B0Å[Ã+¥ñ-;Ì˜eµ°zBvÇ¥$¶wéè¸ÈE	/[ò&FĞäïë´iÌz®]ÇO.¦v4Kœ¾a¯nŒ®¨Ğı5³”m³2ï¥âTO¶Ï¤¤ÔA¶ÂøÂa€"äh3—øˆÖÉ;qfZSLºuÂ,¢¤GÂÒzÓV›d6øBF ~àcjn^1IÅ
+ÔÆ¬Môõ	³÷ev¶W[˜ëôu•O+{ıD/ˆLïĞe|·åP3ıØm0y¬~¢f
+!ü!»Ï.m -zßtQñf ¹‡[Û8Ò-c½ˆJ}(İ€¥ÉL_”üOGïS±Ü,q{›m7g-”¤H)«Cyu<¼±Rıñ6ç­²˜8S÷ê½·)páÈ?ÑÂˆcü–Y¯TOÑ(|ò†7r€bkÆº;İ÷ç„$›¦>hô¥äqüXŸÁŒ÷8
+_sı%=k‚|“É'ƒæx8ÒĞ”ôO„Ÿt/ƒ¥»§!ûIc†¦}É†àQç¦I¯''ÔÀBäí[^ĞÛ=ø×YóEûëŸ›q(XµÍÍEşT®!“_p(õÉš[0Å­í¶ğÓF'áóF–z\/!»b8oÑUò–’œ|,ØFd"U)ˆÌ'VaÂAxé°Vñ§=Ô[Ğ²´‘9ûï\õu”4¡mŞ_ob) ´Bæ4¡(¯<Œtû¾Ëh?!ÄÒ%ö•˜VJ¶ldqHÆ„ê>®­5õL¡½omLÔ.Üd¿I·f¦0ïË±Hì…˜^ûPt ¶ ¬µÕ1İŠQúm‘Ô?÷W„RÓĞ±B•^+Ûğl¯…é°C5ô½*J{«ãMëYxñ}]=€5Zã…Ì×b)„<`îè•íóÛşŒ«üğ×iAS^Î™ØP0Ğ ©íô(*|‰²ëÉúz/\OìŸ­ı³¸¶y0Ÿ;é¨´_ K¸ xBĞ†kô3hD±IDŞÒ‹÷ı¼se÷x.‚Ùå•b{ Ø-–¼êRÉìàÒò‚ìZø}[GÈ)?hiêBßÀøZ7†O)¶Ø%3É»_¬öM;¬Â·ıfF™&Ñ²˜Z‰|d(ƒCÛ‚ÆHxñ6•uì½ ¯×	LŸH¼î¾q°ö^’İ½Ó¼³¡yç=Ä{ÕÖ]š÷Û=½œğ û@2Šº´k<Éuœ&èR¡’©uVa>ESÏµZ#n‘(MvÇ!äÊñTÊôñË½aT×ÒSÓí¼_8vFæ	¶SZ2*ìıûc6ûĞïe²eô¸¨ˆ¸	}Eİ©^?½BÄ0>;¾Ø	¯¶£Mi?²L^…³›y€3.ÈåÁ¸,qÖ«jc3í´,Ö7M1‹‹;Ç{ÓkòíãRáûv™Õ#1©x‹psÔ.lõkÛúZ°r­µ¯ƒr</<ÄäF˜Ä÷@ì™ÿ»«i}²Ü;F •5â„¶®X¹Ş;Qñ¢‘ƒc•¢ÚyA%ŒYr%ãe
+,?r¨÷ìCL/>ä81d¶?íB²=ˆ»n†ˆ·94éë^ğ„ã
+Ğ&S¤{Z	cËJ^XÙ»8x^j¤j˜Œí±QšCÜÜ,)Ò$¬‡—ø±½…D=#á,²•'a÷½’‰8Ñ§ôÍT:`ÈêÆ¯Ê¯¤4Ùõ˜^ÏgyùµğâUbŒCXµ÷›“í"ƒÅ‰P€ĞôŒŞ)<¬åM¥ù¼Û9Š,t¼Ô²[³* Hì'Êû©?OókkãèZó=†Æ”Fví,Ro„<K×]Ã‹ò¡ÄG²Iùh²¥Ş8î›N‰¤{nOi†<4pC¿-ßÒt¼ò.Ø[’Ñ}bÖÈ¿‹¦šœùR˜‰¹pª¥ó :ç©»dÚó¶”.¶Ö¦;[•ÜËë(Şü½&¥ÆŒOîäó.3w r}|öêäãÅÉùÙÇó£«7×ñmšs¼—bCáÈXáˆ~ñ¶ø&µ‚ÏüA	0½Ë¬1	µIvy.2w«àäÉæıºX5^¡;eMµ)òÉ:»}%â7$"ız*ÛŞµÕ`‡ZÓ)K÷6 §*¶|22éOïqq1hía%u-#/±4œ´§|™”§T/ ‰˜Î€½væj\Ú¤tmSİÏdZTy>œ3ÊV5Õz¡‘ÁÄ¥×‘FöúğRÔ\a ô¢õOõj.ãÃĞSTLÈn|ÖBÁk—cäÀÇ4‹Ÿ‘hœÊC“ó$ŒPåyf›;Oxg]/0…ö°È1nÿ2kdâxR‰!áSíÑ™ÑU4@H²ôŸ<@ÃªuûùYõß±×XD}lÀGYŠCív9‰dhE?HŒ}>xık2ú§	úïş‹öf¾5¼N¥]*õ"õì¯fD;›ö‘ağiÓè,LqÃOöF#4Lã2)ä¬RÁĞX HŸÖw×})(å…c”Q=
+%_8¹\·2—ŒWèŒ,Ş…ªİ-bØBû2]§(ÔØ¤jóıu|Ò›ıç|¬‹r~°ì?,şÆé´ñflæ¼v¦õ?»:²ÛL+©Õ8’„kzCñ}GgnjH‡Ïñ¸ô±ˆÔ¿–ÒïÁõdX±C ”S%ÊÖ4êÖÛÌ®£x}gá¯ï{Ê{zÁIwê¿ÏZcH--- FILE_END: ./palproj/.git/objects/00/afcc67c50da172c23320f01db33b9122bd3961
+
+--- FILE_START: ./palproj/.git/objects/7d/55216dfa3ba7263442a6e84fe12313cdeb8f8b
+--- CONTENT_START ---
+x+)JMU026`040031QĞKÏ,ÉLÏË/Je(¸ÆUöÕÔ H'éÙ·®M†vSÍ¡ª=ãııB\#BôrS\=SßÌ}9Kõ}jÿÙÒ¿ökùš BbACÃ³ìo/eJSuóL­¹uV†ÕjLJ~rvj‘nr~nA~qª^enCJ®Õ”êĞÚó,MÌ•>3Sno˜¢TmnjªRš[_P”Ÿ•š\¢WœÁpüÎ'óƒG÷?|m“é¾öø*¡NƒÃkóÒ3ó*œnTDnùöØKºØj·SªÄI)Ï· By^‘--- FILE_END: ./palproj/.git/objects/7d/55216dfa3ba7263442a6e84fe12313cdeb8f8b
+
+--- FILE_START: ./palproj/.git/objects/dc/4d968e64dbec0c44f78cfae8d16319828e1566
+--- CONTENT_START ---
+x+)JMU045a040031QpÉOÎN-JËÌIeXùä}Cİ»ì7\¡%~SÚ_áûª*713O¯ ’a·‰èı£¥Ò)N¾¿8¬ş¿|.ib 
+¹™éE‰%™ùyÅ~e‘ºâ?S©Víê$1>}ëÃ æ¥–f¥æ¦æ•ë•T”0¸Ú|­ôÉ§÷ô£*¿z¢ËOWåh çc>…--- FILE_END: ./palproj/.git/objects/dc/4d968e64dbec0c44f78cfae8d16319828e1566
+
+--- FILE_START: ./palproj/.git/objects/dc/5a2d69a307d9500c6c3f6e04cd7fd7238988d4
+--- CONTENT_START ---
+xKjÄ0D³Ö)z?ài>– „ä¹AKj9"cÉÈ2$·InMÁ£^AÅ¶®eÀÍé§Ñ™!H£T@ë‚µYj¤Hl-IòFåhÏ0hgçÄFë€ìPâÓ&Ï2k‚õ$&FtÎ»Ù›8{/è­Ã­…+¼S…çô¯ı„¸O±­/ gƒJi…
+.ÅYœÿo-î)mÛõØÒ~…Ñ`ZÊ(Kmj‚£Nñø«ì£Ôş\NËƒ÷Iü 1­Z¯--- FILE_END: ./palproj/.git/objects/dc/5a2d69a307d9500c6c3f6e04cd7fd7238988d4
+
+--- FILE_START: ./palproj/.git/objects/21/196a627286cdf6a9cdbed75af4cebaf1dabcb1
+--- CONTENT_START ---
+x+)JMU043b040031QpôŒwö÷qÑËMapõL}3÷å,Õ÷5ªıgKÿfØ¯9æU˜’ŸœZ¤›œŸ[_œªW™›Ã`ªÆ¼jİWvL‘®ö}ÿ6,å÷ãª675UH)Í-ˆ/(ÊÏJM.Ñ+Î`8~ç“ùÁ£û¾¶Ét_{|•P§AÇa PÈKÏÌ«`xÜ•}mvŸ®Éó¼¥6‹Opßœ#" .”C2--- FILE_END: ./palproj/.git/objects/21/196a627286cdf6a9cdbed75af4cebaf1dabcb1
+
+--- FILE_START: ./palproj/.git/objects/97/8fabbd7242d3bf6c40938dd209defb5506ef67
+--- CONTENT_START ---
+x+)JMU026`040031QĞKÏ,ÉLÏË/Je°óñïµRu÷˜víaß„gÛ&oo„ªrôŒwö÷qÑËMapõL}3÷å,Õ÷5ªıgKÿfØ¯9ækb 
+‰;„ìOs¥2˜yÜßşn¹OùïmS Æ¤ä'g§é&ççä§êUææ0ˆ[nıFY%÷½¾i[V6ï½ÓŞ@Õæ¦¦
+)¥¹ñEùY©É%zÅ‚Ë^7j?ŸÔİ|kvRåı2±S¿»!Öæ¥gæU08İ¨ˆÜò;ì±—t±Õn§T‰“Rok]¤--- FILE_END: ./palproj/.git/objects/97/8fabbd7242d3bf6c40938dd209defb5506ef67
+
+--- FILE_START: ./palproj/.git/objects/b1/533b068b66f140acae66a1a953fc653f506788
+--- CONTENT_START ---
+x+)JMU023c040031QĞKÏ,ÉLÏË/JeP¹¾A\#TûÕŞßoŒ®Ì2\£Psá"T•£g¼³¿_ˆkDˆ^n
+Cóßpæ)aµ·›å?i4;OfıtÙÄ 
+êì¿5lfİ¯âoe“šêŞË¢}jLJ~rvj‘nr~nA~qª^enCŸEòê´ø	OÌ¿×½VKÏU^?mPµ¹©©BJinA|AQ~Vjr‰^qƒlğóë	—ê×­~û¤º8ó~lÄÚÌ¼ôÔâ’Ìü<†€=
+Ü÷.¬>zpnI¼S€³-?DM^zf^C×Ãb_!7î“ú2›bİÂ­ Ùg--- FILE_END: ./palproj/.git/objects/b1/533b068b66f140acae66a1a953fc653f506788
+
+--- FILE_START: ./palproj/.git/objects/24/d7b01728552beabdfbec32d49a31ac207cd0d1
+--- CONTENT_START ---
+x-ÍÂ „=ïSôÖDˆÆG°w/	?[J¬,Äôí¥ØË·Ù™ÙY½’f×Ëí4°ÇV
+ eÜŒ2J)`ämé¤Nüˆa¨jçÈÑ¹³3	hù‚¹ÈŞĞVC“r0°;™&à¶Oï¥®O¡úDá¡°ª’WzÅ¼u·Ÿ;Ûíd}¡Äf¿[#Ïß¸«ÏŒ‰}âJÊ¢=L£øKYÀ%NH@--- FILE_END: ./palproj/.git/objects/24/d7b01728552beabdfbec32d49a31ac207cd0d1
+
+--- FILE_START: ./palproj/.git/objects/12/33931f5a8370a0a3dab2edf9f4616c91ab235a
+--- CONTENT_START ---
+x+)JMU044g040031QpÉOÎN-JËÌIex'fT §'j5éÑ±Ö‚U†İówê@Uå&fæéT2t•¨MP2ô“l.”kY¶<TIQjaifQjnj^I±^IE	Ã–©IË…¹j.+Y«sàşfİ³3Ö  sû.w--- FILE_END: ./palproj/.git/objects/12/33931f5a8370a0a3dab2edf9f4616c91ab235a
+
+--- FILE_START: ./palproj/.git/objects/d6/92cdffb2f97d899a809d9676719432f6de317f
+--- CONTENT_START ---
+xe‘AOÃ0…9÷WXİÖbÄuÓ¤	MÓ„Biê­a­—Ò»¡qØ%Q¿OÏÏyes=Œ.°
+*³+¹Åş„eÇ¥%È•ü˜Zí0šf‹9¸Cùñ>½»MBeê$·vßZ_GÑ VÈÀ%‚¼÷†vPš­ï¢Í"{šÌ2¸‘26–úş±uxüj¤¯Fâòƒ¢VU:¤I0e«ØZ92£‡‰Õ{¹´Ò¥p£ñbùzK£lıÎ¸4IÈ&½q‰?ÌõÓèÆ{1÷?€ØÕ–XWmit	­Ó9Ö»ƒU²íõÑY
+iÏİôùĞ¥ğp+R‰}<Ÿ@‡<ı—Ï	å‚ZQ#qt ³%íe9Ÿ6ïSù[|\L<„ø„øÚÇ©ëâ÷è'{¨--- FILE_END: ./palproj/.git/objects/d6/92cdffb2f97d899a809d9676719432f6de317f
+
+--- FILE_START: ./palproj/.git/objects/d6/3d0497c797a47fd494f399c37a10333978883f
+--- CONTENT_START ---
+x]TKoÛFîY¿bN©LÔ)Z´—ÜÙJ®)v ‡árDmµÜa÷!‡ùõY’¶@»óø^[;®á·?ÿã§/»ıÕ§=¬ş~Øßü³ÿºXÜQ Ÿ#DîØ·l}†}¢o	°æœ  ü/ùàˆ”rÿa±¨ªíôõ#£ûPU°£”´<÷rÖë,×Z‚5ú6£üÙpCîBæ ÂQ'vhÖ8@O!²G9R™ÔĞ™÷ùô¾Ìã°¶Î¦v)`¢v¹‹
+tÛa`ŞeÏ@>æ@ @É(BiËèl+¥VvHçâûÒhCéÈ;.½áæLaH²cÏÖ9¨ug/X8[”ÁmºËµ Wnêr–£VTÕ5›…B(
+Î«ª@Qrv	S#€UA`ºaªDÂ­#¸ÚŞÃ‰†B¡1§UosR€[‡^éßà ÂŠvF7nàØ û¥0~YM§S1FĞÓxEÛ ıµİ	b.óÙÉj†»ŞQ’rTGğáR~âC}‚å–W/Û+|G—Qz)Ó·ã	°ï5#÷V¦:H³g›Å"«£pTè¹~UnüÙöê‚Yìi]İò‰ÃI©VKyø\gŸ2<Ú²i3¹kù¸¹€½Ÿo‚Ã>q?‚ÿÆ+ó_¶AoNnñ´ÈÛèş²s1o¤ î(ÒˆCâœ’‚àŞÆ²)½ƒëb·(î4 »±Ç¬áÓä±t$i7ZúÈ1MC$JêqZ WÑ¬Xb„òDµ¨OJŒv,xÅå]${•*mÿÂX¼#“ƒdK«×"@ÀVYX9ÎÍÁ¡8MS:w‰ÓmXz†>×¢,Üo›FôúÖ³®±A1Ñ!p÷ãü‹É…òì””ØïÅ$Eß‰I±äÙÊƒ0GdŠ–î¤ïÕTXt{õYœD|KÒ£ÄPM¹’ªÀååúœäUù®µç_ÇH´(‘7’“)ô*_é(ì”:YzŒ™&…ñ[6s®«ê/	ïz>¹
+„Šê„ÆéAiX“¤K5çƒ5VÇ”X¼y_–(`ŒtNr±T³kÄ~qˆ‰ºÎ>­vBæâËÍÃõëÿ?¿a--- FILE_END: ./palproj/.git/objects/d6/3d0497c797a47fd494f399c37a10333978883f
+
+--- FILE_START: ./palproj/.git/objects/ed/c4ec73950838056d7b9c31cd3f2ac9a9d41c7f
+--- CONTENT_START ---
+x5»Â0E™ıfJ+U% ± E‚1v`·RšÒBšDn"~Ÿ>ÀÎ½’këk<ìå¦e?`kõøÆ~#^g Ğ! Z!#rz0D9ÀyÊKö)šLìDi±3Özúx¶M–Ÿ §a;·¹*°ÒV»Ø3Vì_æñ“à%„­ è[üP)Dƒî‘Xo-Æä²ÆÔé©îœL£²\V8®RÊ¾ØCó--- FILE_END: ./palproj/.git/objects/ed/c4ec73950838056d7b9c31cd3f2ac9a9d41c7f
+
+--- FILE_START: ./palproj/.git/objects/96/93c4a2acdb2b8f5daae85a2df69c0ccdcb6dfb
+--- CONTENT_START ---
+x•SMkÜ0íÙ¿b †4…]9eÓ˜B{)¡½äT¡•ÆµXY2Òx?(ûß«±7Ş&”Bub4ï½yzöÚ…5|¨Ş½À-zJğ«€¼v!n0J¼GM6øWÕ›U]‹¢%êOmÖk7dD^ípI‡S=’lÔàHr	@õ½³Z1™š‰"ª®.Ææ„Ş4Ö=rAğÉ±WÎnQR¦¼½1q‹ñ4Oàl"ôğ¾š°\JÈ=Ò«Á­\Õğ>)k„C"˜Ğ)ëÁ)Êt¶á"´j‹y
+œÆcªR©U…ÿiı^´Ô9æ»ÜÂW®B¢ìT;J£.û2“õ÷Ó¾düùxrÆM<-£@üá/(äD\Ño>®ªñı>‘ŸUsvçuçTÚp$så¬–«ÏûöÙ«”€Ó¿¢a™[o®«ª¬|1×.`gã×¥á6èü-AXÀIÌª<ËDd‹ÊäÎÏ9!(Çœşİø°ø†Ê-¾ÜC±„RÏÙÿ•ıaqâNEƒ†OPNú)÷²y¼âÓÁ} LºÅŸ#î¢%„‚_öÕòõe	¢¼‚uşú75Ìãé˜±ßx•E--- FILE_END: ./palproj/.git/objects/96/93c4a2acdb2b8f5daae85a2df69c0ccdcb6dfb
+
+--- FILE_START: ./palproj/.git/objects/fa/f7fb1137a30b4c523232d0ccfc3569c7d48e93
+--- CONTENT_START ---
+xµZmsÛÆîgıŠª’1ÛI“f”Ñdh¶9‘I…¤â¦¶'0 (Yµıßû<{8¼P”œ|(ÇAànoowŸ};\Äé…zşì»ïÿ-º^§Y¡Ò|¯¼ZçwAº^~»w™¥×ÊşrôÇ"ósUÒu°)´wãÇ]M]ùù*.,¥LÅáµ(×ûêeš©u–.3çêÂÏöÌÈØO–ÁÊo™¦ËX{Kø‘ûJî½Ò‰Îü"ºÑÃ±{}¡Ã0J–¹™¦…Nnìø8õC¯¼µ¯©â…Q–&×:)ÔŸEşE¬s%›uğloo_¨ã4¹Œ–®”&¼ƒû'b¾ºŒb­zÑ¥JÒBùq¦ığNVÖ¡º¸S£4¸ÒÈCî¹îï5˜ìõ¹øÈ/ü?×*H“D²|¨?ŠÁ%Ävƒ{iæ…{£Şëé|¡ =²Îm9K]ô:¿¹Ç‹éÌ+tªSÍêô9o2|ã>:8oíC'E”y[ÎæîìQ°‹À&×™áát8Ÿ¿ÎF’±ƒ0²1 †§cõ‹¾q4LàÕtúêÄõğÔûÅı}Ùö ,µÔ¾¯ ä­;GGªs—n2k–ş:ò®ô·Ò™îî)|ÖY”@òîl6nÏ§)ä(ËT”«uìz•Æ¡ÎUñ¯`ëbØ0·Û(Õ%Tî€IR×£¢÷¼¯ö•‹+¾)°@z¤ F!Etê+U¤ªXiun’f÷ëpk
+µÊ4Œ.‚ù`^’G¸Ãa¥IÂŞ`eàaïx:r½™{:õN‡‹×;Ù@5?ıÃ¸Æ×èÓ‘¾ô7qa¸Pëò!ƒã$*"pû_³x©ÒJ9Æ‡:ŞÓ´±şcÈïÉø£|åO«yÏ=gKãHJµ+FE´W ›ëb³V~ÒXøı¡¾„†
+àÎ«Ùëåw:7lã(_Á™pzBY‚kî 4TÊÁlQ2éb³“4Ñò»ÈîyZ@ù°òÇ%=Éü¬Ò¼8*Q?h=±Lğ)±İ~JPò	AÛ~²öóü6ÍB>µX¬ÛäÂ¥õÏ7A ~¹‰ã;ë¿`íİÖ³ŒŒd ĞÔ½.`âü¢ÛEÀÑµÌ"—7Ë $«…dÙ¢¨>é/%jÈY¹†U”À##rUv’{Tœî›,O³Z¡ÂÑ±Î&]šwc^WÉD‚S'İ‚HÍG&/V §#€Î<­àFÀ; ¬6ÉU>P×pîTÏ@ì€Œ2UsgHYi›„pŒÈ,±¸gÇp×üÏÜáÂUî¿îd>NÔø¥šL¸1/æ¥ııT)³1e1|qânßÚ¼j'G¡:;Ôélüf8û]ÑÜ—Ã³“}›—éµ·ÙDa¯ß¶2NgÜôÖô^°,œNÎNNîDŞèp“i/ñ¯µŒ¾?H„ëÈZ¾FÎŒdêÒ©Î&ã_ÏÜb?s‡u¦o˜2„›u° xĞ¥Îi¦-r+•ö”	Ä½ığc_‘¡ƒê1\Ô?™… FaĞA!/ÉAÓk*ù½b?/¼ÍVt-ÆoÜùbøæT½Ã[ó§úÏtâVÂŸLß"µ cöÓ¯Õ«©ŸÙ –äo¨²xú·®ñ_]<r.²\š~±ş
+–	3ÈÓ åiEò˜ı‰Ñ¾š!ÌÈ%<Pµ&Ğİd†Ñ3ß3ˆµŸ5€û àG:Ö½7b/ñhrBÈmÛ—¥*·ı(&³³É1ah0µMiFÍÍj<r'‹ñâ÷Ÿî+ã˜ÜCâX(£š·ôS'AE¶I`Ö•vŠñ›árºÖ‰.5‚$Ù1'¤Ë(\™ÑÒ +ÅP¡ˆš¡î	Èá¹a2Å †ü–×bE^¯wd\&RˆşÒO°‚LéBU¯r	ùÓKlƒ ÌUÓTaN™€`ß ­\nÛ¹
+Ã9"ğ»sAíl©?2¼\F s:›»£³™Ë<î%ôº WÅV#¦4XRõ$îH­ˆ–(†	$=…
+ü52Ø-J<—Y ¨¨>µ$ËÅ1ÇóT­°–(R¬˜uâèJ«n5“.÷7Yw º–ˆ:={q2>Æ-]fŸûê­Võƒ3š.†''ÜÌ=½U]á²õ‹`¥}#4~§’­—‰48=@ù]¬Ûûù°bè³å¢ÿ>"„¿Ï†§ÏãÉÂM†'ıŸßçßôŞ½¿}àœ?ÁØozï{Î7?¿ïË“Ãní×±æøÕd:s‡sW}®· ÂBG×&nQCSGê™Ü`½d¶%t´eÜ8Ôi´Œ²´DRÛWÃ¹´%aäBƒsVfğ–TenLU|ceB x­]7â‡@ ¼5AğÎò|(|:È"³¢×?ÇE­nÎ’¨3"²i¬Öñ× ZØû$ûæ}ûéTµsX#®–l5®Ú”ÄUî¼£œzíG(å¸+Ë«B=ôLé¦Ô]z•æ=–Ô7 $AÙî¤Åì—R‹d¨æE¡µÄSÍ«Ç	¢ì°e–nÖ¨—îI"™J¥¤¸¬¨Tê¬@ß€
+Ç?_­ô&Cr‡¨çÓ+)?»î„OéºôrË [QÂz±EAP¯¬j q×"h*’ŸÍoKÏ€Äù<øü÷>°½¯[Q—ğO¹1P²¬–'ı–áU›öDÄ‡çm¥=8Rk¨Ë(—©X'mD5JAx˜’;²RñÓª¤Ó6nƒÁ–îé¦An4ºVpèÒ	B.Gí_äiŒÎTy°onºZ‘ü7™Ş†zR3„Î
+òUã`êiâ¶ ¼Eä°Z`'šk@´·,÷óÿkş–¶º¹³NÍ0ZÿhI(åX~jwPËÒÈÉ¨ÍOî ¡kô˜0ş+òˆ9N~xÕ¤Ç=f[¬0¢ö¼Z¬‰ôÏ¸ÇN[r•k|9"my»¶Û,U¢³¾ÎVÀR
+Úìê$†6IY]leU%ª»„„—¹6"TRxL@Óô[D†ÓdÙY›aøHb¨Û9’Ñu×hPF›:5#ºrcJeÿ
+™JUà ºe&…¯F8‘LõPõF¶1ÓÙÑn‘=BÓ,şé”YÖ×z.Ë—c?aKL¶†Äù6*VéÉTµšL7­U›+Ó2Œ·’zR9iôú÷¸®—æüG:Ò¹“ªª¬SLv ç”åEeBäÁb¥Ï”DªíZ NÕ
+š.Ø²O[–¶èÚæÉœ	Æ<æĞ¸ 3Jğ·ÛzÍ.
+9C¢è$yEê™eàïËd™#ø‘¾’GğÈB9*Ğ	’SJ˜²TÌ•d°Îz œ[üo‹ÀÎôª:Iy¯ë¬™à:·ò·è6|2f®—¥)Ê
+ÏTˆÚ	;ã·~|Õko­‘åq*?œNcæ$1ê¶nÍ 2„"aFân¼¿#?‰šÉot¬Ñõ% „tµŸ–fì° Ùqr–A¸eÂ©¬³µg;v±ÒÁ•”ÁX¬Z‡±Òlèa:+sT‰ü¹ ‚êdÅæ7£3ø‚\,©¦b˜p|,LŞš(ĞSÔİ!`K’’0}z§Ğîåñqbì$ûm¾·‹
+RnF\¼¨-µï”;i[tœ2±Ïsâƒ+ ÷W$.$Ôò–ëæ·øÅM6»ë´Ş+u™Ô$Ï»âf.aFUÁ¢fLXÄBfÔƒ¬ØUETeÍM£ux$ÕÌhìÀæ·:†›4à±*ş¾„Ö— Ò„*MÊ¬³kM~ˆ$9A¡6IôÇF£0FÏÔ0C±ÜæWebv%„-|åûı=yö®ÆÏ‘2öº›âòàÇn¿ï¬ôÇ0¢£} ùMŞ[¹fç¼,~•Û]×&ˆBüƒüJO½É§½¶`0}ö2C $va»Od‰4¿©•(Ùè6lì2V±¡úÄÚa×fû_JCq¬:Í,ƒmÚ¤M4zá8Œî-éî«ìp<<›]fM8¸æÙ°„ú‰Ìè…ºÍà“ë²Û¼ I/çğ#õı3Àu~Ø ½e‚†"3*1¢E2kÁl¯ı$¨k ¢-ã´NÌ{è—/uïÙ@*ªR4–F9ÔypÔ›øù_:ïìpÆ†e±ÆÖ]ÔßE‡ê zs¦)F>í‡Á	Ç'©é­‚Î»–©K±ŞÆ{sáó¶nHõA÷ÙÀCíüBµ¥hËb=ØÃá£k}Ç‘K¼!lø6@ŞkïgËt,E±"!FK¶lÄBg²<ô&ö·ã<€SÍ›&sâ8Jë¾D9’›úPfÚu°Çü½×Ş¥r2?ÛKYWÑn6˜±õßRuU`íl5ê‘æJÆ;òº¸ˆêD¦SÜ¯K;sJs-W „®O7·éÙß;Lè~©jó»5Á¸×Ç'Ô 6ñîÃ9!‹¨¿4µIfèÓ®S´›^¦> %í´6²ÓĞn^HsÕ˜	7ÃÀÅv>ÅN‚s8«ÇÛå1ØşŒ'8µÅÂd1•¤¾qÒ¡šIF[K¥É™½¦ğ‡Ø“÷‡ÃøoÃ“3w®şÑöƒMÆĞ?N^¢½@Wœå­Gê}5šòhïõxòê'¬K<Vco^úæ¥q§lqéöwÊæ!™´ßMâ¹î@‰÷1PkGtİG\¼Ü½o–œì{Ã‹£şCÆ-—eGCûh›…{¬ş… l#âûÄ„^@Š(ta0¶!`ü€ú}9ø=©ùşÒ,ÿYÇ~p%;˜•?Lş´ÑãhÄ,ÆÓ<²ßÛuÌ½ËÛ#h®³%¥Œv2ÁœV€×C–ÓÙ¢Wº” g“€ò@¢EÙlÜ†®º-{¾^óT.¬"ùWÄùÈ.ÙÂËe#c²aÅT¶RZK¶
+Úái sâi\©šJ)MÉã`µñîFÙ°hg¹Âiã%°­²ÆhÇk#2ÜÈÂÄÍœğ	¾À~_UÁrx]Ïc§¾ë¡ïŒWê¼®a ¤ßnTQ¹4¹å`4N¢¹{3ÓP5%|Fxü…vğ¾--- FILE_END: ./palproj/.git/objects/fa/f7fb1137a30b4c523232d0ccfc3569c7d48e93
+
+--- FILE_START: ./palproj/.git/objects/dd/2b7efcfb8c058af98db9063e7c008dbb8d6deb
+--- CONTENT_START ---
+x­’M‹Û0†{Ö¯˜ÆÛ¯Ód³J–B(”ÒænÆöÄQ‘%W’wëß±´†öB}f4¯yserxÚ¤of³ÙQK/QAqAé¼±xÌ	ñ…^¤“FÃñyéSBùö7´Ù7äv –Ğ<óÁ9Iº^$›ÅÃ;Hwéj·J—Iú¸Zo…àYâlM¨¨Îe²nŒõ`qısßªâBuèÀ¡" {Ó KÒ^%Y7‡ÖQ	yïÇ^Kñ+máTi(Jóª³Éõ'£IäuqÉæ¤ìa–Ô.]Æ¾F„(émSY,)Šwø (L]#g¶Ş@Eš,#˜Š‚4ŠĞ`ù­uşm_7t0Í²°eè(ìágWøá|Èq¸<ÕÖ:
+eÎÇò¨=Ud£xºU¬]Ñş*Gñ%\¿¸ìVúÕ[©«H‘®üeŸ®×wô`Æ6«¹V4
+8ÑÏôÜx&î£İ?VzÉ=ÖÍ8°wÕ‰CıPVóÂ‚x!Ø*¿g¾—jóÅáô='ÛN|¶²FÛ}¤îÀz¼E©¹ŠÁÄçñwÊÛ¿9ê÷~û¥>èôÿPZÓüÕw)û	q¥1--- FILE_END: ./palproj/.git/objects/dd/2b7efcfb8c058af98db9063e7c008dbb8d6deb
+
+--- FILE_START: ./palproj/.git/objects/f8/5a6733ecc278a11aeb7c0c18d4d3ede6f18db3
+--- CONTENT_START ---
+x+)JMU044g040031QpÉOÎN-JËÌIeXùä}Cİ»ì7\¡%~SÚ_áûª*713O¯ ’a·‰èı£¥Ò)N¾¿8¬ş¿|.	UR”ZXšY”š›šWR¬WRQÂàjóµÒwj$ŸŞÓªüê‰.?]•£Ò0V--- FILE_END: ./palproj/.git/objects/f8/5a6733ecc278a11aeb7c0c18d4d3ede6f18db3
+
+--- FILE_START: ./palproj/.git/objects/f8/010205845f71f46bb69a130de008898795c799
+--- CONTENT_START ---
+xÑJÄ0E}îWÌ»R&6Ù‚ˆ è»0;™v£ÛdI'‚oñ¼o‡Ëá^)Û–†ï¬ª‚úÅ J#OÂèù4,„¢çèf™=ùîÆU³ÊDtñ:áHG$Nä½§ˆ<Ìq‘Q=†1tÜìR*¼ò–4ÃÇgxŒğ\½—²õÜÀ…	‰7 Ü;Dìâøhú?»{¹ê1ÖnõÜÖ5å¸ZZXlÎª~k5x»òşVà½å$¥æàøÙvƒZšéŞw¿²Ñ^I--- FILE_END: ./palproj/.git/objects/f8/010205845f71f46bb69a130de008898795c799
+
+--- FILE_START: ./palproj/.git/objects/28/8c1c25e3c4c10bdcd1ce78d630a2c053c7b0b2
+--- CONTENT_START ---
+x]‘Ak„0…{Ş_1KÏÖ[¼t{m=,”£F“6f$ ”ş÷Îª»,¾7oæ%¥ÅÏwb|9}¯ ©³ùN\%ë|¼²*/¤•Œ‡Âã—ªxk›D¸òU;ĞÌÚå~®-±át4²3vNanåM“©‰iMëR¨”#å3è¤gß€°OáéĞOü^ıtÄnZô)ÜÇq|Ëú”$É‰p›I„zÉ$ÎCmÑt”([a§€f9Ş¿œ{®‹6yŸ/‘Á0ö ]~tÎ¸öA„ıUsÒÌy³-#h<v@Z­ÏG¬¾•gèH§üZ*Âu*n¶|Ãæ~|--- FILE_END: ./palproj/.git/objects/28/8c1c25e3c4c10bdcd1ce78d630a2c053c7b0b2
+
+--- FILE_START: ./palproj/.git/objects/80/e66bf6b1d26919c556254649657cdacd1c0538
+--- CONTENT_START ---
+x+)JMU044g040031QpÉOÎN-JËÌIex'fT §'j5éÑ±Ö‚U†İówê@Uå&fæéT2¼=ò¦x*‡knõÃ³öZ'W^‘©‡*)J-,Í,JÍMÍ+)Ö+©(a¸Ñ25i¹Ğ3WÍe%kuÜß¬{vÆ 51--- FILE_END: ./palproj/.git/objects/80/e66bf6b1d26919c556254649657cdacd1c0538
+
+--- FILE_START: ./palproj/.git/objects/0d/e7a4e2a4c1d7134f424529d5ef68462813c668
+--- CONTENT_START ---
+xK
+Â0@]ç³d&ÿ‚ˆOà’Ì»H+1¼½Å#¸|<¼²¶6Ğ:FP8‹ÎìL&ªÕ95Æ‰¨`@›™&a'±ªgê²¨Áiëƒ˜œ2²&½ÔÉ‘©XY¬'4BœQ¥m<Ö·ÔfYàşIœù×¾CyÊÚNi» ;Eobˆp$DT»Ø‡üW«Äï–uˆúŸºGÙ--- FILE_END: ./palproj/.git/objects/0d/e7a4e2a4c1d7134f424529d5ef68462813c668
+
+--- FILE_START: ./palproj/.git/objects/18/11a6eb812be7928b83da9b6279df7616cafb8b
+--- CONTENT_START ---
+xSÁnÚ@ìÙ_11HH‘T½5â€¨Ò6€À=¥ZÛküÊ²¶v×‰P’ïóÒĞ6j}Bïgx3ãD•	Ş‡ŞuÎ	éA"lÄYØÔPå`dZK÷Rí¡È:¡O7µ9)iA®` ‘Ú!#~É•fÏTBg(kWÕü"cÈ -µkPä
+¤J2ËN˜­4¶«x¼Œ×7ãå—ÉrFQ„éõ×ÉÚ?"&³«?·<lv«Éb¼Çóå	âr>‹'³¸¥ 3†A Ó¢„g_,çŸ'—1®¾İ,àUZH‹`hSâşÿf1ñµ¶NF´LU†´Bj[v--Ù®Ô¡`éÊÜû©Å·Ş[‰”—¶’)	…´F¤İ
+òæõ¹}%‘ãŒ[Ú;ô¥¾ï½è=á¡à˜p=]88‘!2ˆ2t{ß‡=¯x¬ÀO«-UøD3eÍŠ>b¿¥··»Í$Äh„°?èoÈÂsÜİ]4ùjl¨š˜I×ÒrzMh›$Uf%×{)ÑÑ³ı›’Y½«Ö•)°y}[„ÿÖ>ˆÏ}}U›ĞØåWmÚİÇ×í{î>6 çğñ[Çx}Jî‰÷›T¸£e-ô(ö«Ê“
+9‹qÆÅC¢„Şò§§9d.B HH‘Û#‘îAJ}ˆ(+µ|³Û¬Ö6û'ÊM3˜--- FILE_END: ./palproj/.git/objects/18/11a6eb812be7928b83da9b6279df7616cafb8b
+
+--- FILE_START: ./palproj/.git/objects/43/fc0887acb5a5f4f55a4797d49bd6df8a68fbba
+--- CONTENT_START ---
+x+)JMU0¶`040031QÈÌKI­ĞË(ÉÍaĞè‘Q}|ä ÷‹ç*®,:||Ã& dƒÅ--- FILE_END: ./palproj/.git/objects/43/fc0887acb5a5f4f55a4797d49bd6df8a68fbba
+
+--- FILE_START: ./palproj/.git/objects/c9/11c86d361d52dae883e2217f1491d6b9d132cd
+--- CONTENT_START ---
+x+)JMU04°d040031QH,(ĞË*fˆIù?Yöğ*•¾­ÚGçX}1†ªÈÌKI­ĞË(ÉÍapß~‚cãê¸…wd¹ö-¾1e[TUqIeNª^rq1ƒ•jì²D†ø)f¹S**ÿH¯–üuè3 õÁ.--- FILE_END: ./palproj/.git/objects/c9/11c86d361d52dae883e2217f1491d6b9d132cd
+
+--- FILE_START: ./palproj/.git/objects/d1/59097bb15554463151d049fe91666636698d7a
+--- CONTENT_START ---
+x+)JMU023c040031QĞKÏ,ÉLÏË/Je°óñïµRu÷˜víaß„gÛ&oo„ªrôŒwö÷qÑËMağş*Õõòó¶÷ŠŸÓ¤n§ñ†,ÒO8bb 
+‰ó¯'Ô~Ü{qÒŠäïóŞš¥ºOÚ
+5&%?9;µH79?· ¿8U¯27‡¡…Ï"yuZü„'æßë^«¥ç*¯Ÿ¶¨ÚÜÔT!¥4· ¾ (?+5¹D¯8ƒaş³ğÇÏ÷–>¯w«Ş[/ô'Âà*ÄÚÌ¼ôÔâ’Ìü<†€=
+Ü÷.¬>zpnI¼S€³-?DM^zf^ƒÓŠÈ-¿Ã{I[ívJ•8)åù Quoq--- FILE_END: ./palproj/.git/objects/d1/59097bb15554463151d049fe91666636698d7a
+
+--- FILE_START: ./palproj/.git/objects/66/363822a21cf9eb186a9413aaba146cacd5f8d9
+--- CONTENT_START ---
+x1nÄ ESsŠéWZÆH«(Å*eŠ\ Ã¥ ,ÌFöícå)Ÿ¾ş­”<@[û2:3¨E-„2.‰Eo´§d’2n²ˆ*çUœ£X©sÀ†£ÔÎ¤¤æ“Á¢YÈF/'B˜Í¬½%'è9­ÃJæ
+ŸU¸Å?xë'„íZ¹ÒóïPêi‚‹’RŠs8ÿÏïy‡ï\wX{Û¯•¶6î?90T*T#<˜âù0µ‰_æ¬U„--- FILE_END: ./palproj/.git/objects/66/363822a21cf9eb186a9413aaba146cacd5f8d9
+
+--- FILE_START: ./palproj/.git/objects/08/b443dabab00e141509635d0952c45b64759f36
+--- CONTENT_START ---
+xA
+Â0 =ç¹%Ù¦»	ˆxğş`³ÙjM¥¦ ¿·øÃ00²ÌóÔ, ÚªjÁû„Œ@QÊˆœ¤d-4ğD3¾p–ìÍ“W­Í²J_ +“¸@z
+”0æ~p£$Ò È†·öXV{åyÒjo®öT~pYwW'ËÜñv¶BŠˆD{ôÎ9³‹ı±éµ©÷©¾Í¬ÉFó--- FILE_END: ./palproj/.git/objects/08/b443dabab00e141509635d0952c45b64759f36
+
+--- FILE_START: ./palproj/.git/objects/ec/9d45c26a6bb54e833fd4e6ce2de29343894f4b
+--- CONTENT_START ---
+x}SMkÛ@íyÅ@¶AõÍ´|È¡%…Ö:Ğƒb,Ö"ûÑì¬ş÷µdI>¤'­fŞ{óæ­t4ş_7_>=ÀhrÚ*n65F<"TŞ5­îÆÖ»µR4dmU¨ˆdÿŒSÑ÷*©`[İ3 i±`Ó³	[È²e óŠK9°éôŠ• ˜bÒYÄĞÑ"Bç ÈÛà%¡î‚˜Ló¥±•–ÅÛB¬Z‹®Î!ÆPË\ß vÑ_×cBºáË¹ä4L*yøéµıûÍÕÁH™ê.[ŞÇœßšêDö’¹äA~+û DğpKfN”DÙ›Ôj|°ã¼9Üƒ4ûyeS(Cg22ôÏÓïº)ÊûMë½CãĞl'æäíC¾šx0Á×ä$€dpğ0^ùÍÆİ÷—™¹Ì€ÈwyLNş#qÇ¡aßrX¶P•Dœ®`¡}îVt*.ùÂk5…¯Æàv/¯ûo¯jL\€SÔcµjÅ T¶¼.Â]}Ş¬7‡ly}ãBšV>2Ô$_¯ü1ÔØ˜(ÏÙ¯Çl¯ş%s*ö--- FILE_END: ./palproj/.git/objects/ec/9d45c26a6bb54e833fd4e6ce2de29343894f4b
+
+--- FILE_START: ./palproj/.git/objects/58/b8123fcb0a65003648dfb7eea74c77fbb64094
+--- CONTENT_START ---
+x+)JMU044g040031QpÉOÎN-JËÌIeXùä}Cİ»ì7\¡%~SÚ_áûª*713O¯ ’¡«(¨Dm‚º¡Ÿœ`s¡\Ë²ıóä¡JŠRK3‹RsSóJŠõJ*Jn´LMZ.ôÌUsYÉZ÷7ë± ‹´1z--- FILE_END: ./palproj/.git/objects/58/b8123fcb0a65003648dfb7eea74c77fbb64094
+
+--- FILE_START: ./palproj/.git/objects/b8/e88c8b38e0d3d1926242c33c32cf8f4c1c16b3
+--- CONTENT_START ---
+xKÊÉOR06`ÈM-.NLOUPÊHÍÉÉW(Ï/ÊIQÒS(H,-NÕã ôÆl--- FILE_END: ./palproj/.git/objects/b8/e88c8b38e0d3d1926242c33c32cf8f4c1c16b3
+
+--- FILE_START: ./palproj/.git/objects/c3/3efda9537afa7638fdf5ee59571b9138ee5a8a
+--- CONTENT_START ---
+xÍjÄ …»ö)î¾tğªÑeh¡tÕEàª×™ĞILYäí+}„n||'–y(§ïZe—†A¡M™t §¬6F‘åÑdF¥QÇÄaÌc+U^Ğ`¥÷è”1^¢ö‘ÑFRhbDƒ6`ğj`Ì‚öv-^hxÏƒxLğT;ÄíË|¢ıèŒ–RÂ=ö½èÿ·Ï)Áº±¬õ¦…ê­Àë¶o¨ü³O•çşeƒÜßËÖ.•¿>ŞÄ/ƒW±--- FILE_END: ./palproj/.git/objects/c3/3efda9537afa7638fdf5ee59571b9138ee5a8a
+
+--- FILE_START: ./palproj/.git/objects/e4/d1ffeec1bf420c06af69c11fccfd396ed7a80c
+--- CONTENT_START ---
+xÁÑ	€0@¿3…äG\'mChóª¡Û{—Ò~^ÛxWÆ°ƒ“‡<‹æ]:5	ËU<Ø kÊ¦!NcÍŠà‚©ñÑŞÓ--- FILE_END: ./palproj/.git/objects/e4/d1ffeec1bf420c06af69c11fccfd396ed7a80c
+
+--- FILE_START: ./palproj/.git/objects/e4/ed0284ff1557f6cc674ba6d9032ccc545296a8
+--- CONTENT_START ---
+xAjÃ0E»Ö)f_0Y–4¤”.J¡›,zƒ±4vDk)(
+$·¯Ó#>|?ÖmËŒ³O½‰ .È}LN4iOîÑ‰\œ-»°,a2fbgÔ™›”ó˜¦QÏèQÄGYMnA4ˆ¡âg
+DŠ¯ıT¼ó–¥À×¼¤?xk;ÄËë6ğõĞ[
+n…gÔZ«]ì»üo­>K—µq8®¹Ü€K‚¾|Ã¹ÕÛı œkîy-µ‰ú‡³S~--- FILE_END: ./palproj/.git/objects/e4/ed0284ff1557f6cc674ba6d9032ccc545296a8
+
+--- FILE_START: ./palproj/.git/objects/5d/0eb278a552eea5ff261b297b9b7f4425a0dd16
+--- CONTENT_START ---
+x+)JMU026`040031QĞKÏ,ÉLÏË/Je(¸ÆUöÕÔ H'éÙ·®M†vSÍ¡ª=ãııB\#BôrS\=SßÌ}9Kõ}jÿÙÒ¿ökùš BbACÄ!ûÓ\©f÷·¿[îSş{›Ã¨1)ùÉÙ©EºÉù¹ùÅ©z•¹9)¹VSªCkÏ³41WvøÌL¹½aŠ6Pµ¹©©BJinA|AQ~Vjr‰^qÃñ;ŸÌİÿğµM¦ûÚã«„::C¬ÍKÏÌ«`pºQ¹åwØc/éb«İN©'¥<ß 0¯^¡--- FILE_END: ./palproj/.git/objects/5d/0eb278a552eea5ff261b297b9b7f4425a0dd16
+
+--- FILE_START: ./palproj/.git/objects/5d/209d91a59ea23ef16844bfee0b7e5c86ed440a
+--- CONTENT_START ---
+x+)JMU01d040031QpôŒwö÷qÑËMa¸fË2ıøô%õW¦|y¸JÀØ²¢Ã {t­--- FILE_END: ./palproj/.git/objects/5d/209d91a59ea23ef16844bfee0b7e5c86ed440a
+
+--- FILE_START: ./palproj/.git/objects/0f/a52c1d880af2c9707aba276612a8ba4b147b09
+--- CONTENT_START ---
+xm±Â0D™óü@¬8¡C¦2 ¾ Q‘ÚUú÷„‚£Ïwï®ËÜm5šÍ1»ùf­FÄ;%ÏÕAƒã¼x£–]"7-/_XCòrnÙ÷a¨ºüè§'W‚µ;P°ÙQô½K•ª*ÍW‘‘9æ c —¬ÅêGõóö<uR©kTÿY¸”I^¹z¼J<D--- FILE_END: ./palproj/.git/objects/0f/a52c1d880af2c9707aba276612a8ba4b147b09
+
+--- FILE_START: ./palproj/.git/objects/8a/72527426902712314e1e1183711e84a6bf9e1f
+--- CONTENT_START ---
+xmUÛnÓ@åÙ_1mìH‘	H	‰†‹m ²6ö81lvÍ^Jê¿3³öÆZç!^ÏøÌœ³gÇk©×ğäù“§š]«m“ÚèÔRØ_Ğ?|Ã‹¤_´v_êvó´Ë‹«˜zÙ¢®ÑJÈ…1ÚÀ¼ïïEjŠ–Z),9k=Ú$mS%³¢Pb‡E1J’3xãU—é4lĞ€J8±ïÀ$Ö-ªu1€g£	ĞE·Ú:Â×6Guİ­rÊÎÒó×Å»ËÕU:Šy\øá¼‹ÙÇÅç-š‡ó¾¬Ÿ‡¼VXûG›êáÜålµúvùùœòCÜ:e^h…aíÌ¾cÀ,ú`”>ïyf!“øbÓïø(Uã(³<2ğÿq$2àh¼? wºqáÖ4Êe§ç÷÷¬/K´¶ö2?^0è¼QU€Ã›[÷ü",à BW¦>í\·Zm€Ü¾€x{¿RP5yEFËö³ô1éÎÆÙ¢”º m’U´Lß]úCcX
+)”k,şIÎíŒ
+³¶=I“cL’É¡u=t¿Š°ı>àÔ AS=ºG`™KÏ¶c˜œn­6Ù hÏñËÀoµø°˜_Á5KG-½LGt0g`éLK„ßÍ…ãcµ$ãl®>}ˆù‡Mf\âÑÃpyoò]¹%Ÿf£ï“G©-¥¶:zŞKZ§«ƒä>P!A±âF†&Nàk×5mæPû6= övY×ğ 9ö	÷|(Ø™…FÍ]Cf‰Né$~ë†¦˜¼sğ«S¼cEÎù.öª×Ğ J{Ç³ÑKsíeJ»ø"Sv[<´“§cx6™$	ù Î@˜N!-ŠhTQ¤3h¸_8×å/4Í_Òî­WM©é8Y:Uí‚É=m9ÍWpû¶)™R¨İ»£
+ÁKAm[¡*‰ŒWŠµâÃX ı[W[Â]Kj€ps„Î“		^£Ôí}Z¼³M… ë¾a˜kú4XÌVì´ÂµßL¯ŒÇq7ÄÒI~¤	¢¦$Ìd”ü“D --- FILE_END: ./palproj/.git/objects/8a/72527426902712314e1e1183711e84a6bf9e1f
+
+--- FILE_START: ./palproj/.git/objects/7e/b4708cc615d1f28adc1c983ccffe2de0805c11
+--- CONTENT_START ---
+xKÊÉOR06`pËI,Î¶µ5Ò3Ö3æJ/ÍËLÎ/ÊòõŒô¸ Ùˆ
+–--- FILE_END: ./palproj/.git/objects/7e/b4708cc615d1f28adc1c983ccffe2de0805c11
+
+--- FILE_START: ./palproj/.git/objects/7e/3e31f680b305bf244f3a3b6c6565478d042bd5
+--- CONTENT_START ---
+x+)JMU045a040031QpÉOÎN-JËÌIeXùä}Cİ»ì7\¡%~SÚ_áûª*713O¯ ’agß™"6qÃº”7›ÅõøûŸŞ"ib 
+¹™éE‰%™ùyÅ~e‘ºâ?S©Víê$1>}ëÃ æ¥–f¥æ¦æ•ë•T”0ğ/Õ‘íàút² j—zšĞŠ]Ş"Õœ øz>ƒ--- FILE_END: ./palproj/.git/objects/7e/3e31f680b305bf244f3a3b6c6565478d042bd5
+
+--- FILE_START: ./palproj/.git/objects/9f/e657e3e681bd75e77f467bbd7f12fc5830fc25
+--- CONTENT_START ---
+x•TÑnÓ0å9_q—V*LJ:â©ÕÖ¡[«6<)r§1síÈv6¢±çÚiJ
+€<µ¾×çØçãL¨^¿}óîÅàhœq9Îˆ)ƒ` IÉªyeA3ZkÃï™h@pc!pu]¢¡à‚àlÉ 5“r›¬ÒB™ƒªmUãFìá¨’Öu=p[Q6Dß1mâ X%Óe’^M—ŸfËIE\\~¥~ù=„ÁìúüÏ*.ºÚj¶˜.§É|¹×q6¿Nf×Iˆ£¥¾XÎ?ÎÎ8ÿrµ ÏÒ¶´Ø:€Wø÷;ûs¼­©³NÎE•æÒ “¦Ö¨U(µP¢F‚Ë5¨Âë)É«^SŠ¿•S1Ê‰ ZM¨Eµ‚Â,†È6ƒ€ ¤£ãqÌäıhÇ÷J\^¬&88’C¤!Êa8úz2òŒ§« ğÀêWğ[œ)’Hdô#öU^ÀÍ„C·Âda<×ÜÃc¸½=uó•¾ÑA¹1sY3¿Pğ>ü¢±¥’5–Q•ãÙ‰3ÇUCwàx¾³V4–£eş¶4EBK–¦;gâ@à%¢^—àØw*jÃñT~Xní¦Ğº{óê™†ãÃÿJ±ú…‰P`nG»<uöi3£úy½©ÒJ«oè£Ø”áN)¿ã0¾0€¹¤O­»(8çøRküác?ˆOÃG×ôîwü7,ïƒ{àmÚ}…Û¹§míÈ~¥úUˆcŸæ˜AÈ‘w~ğP`&œ—IÆ·dÌ>0&·^Êzã¹˜#[?äî‘™føFUŞùÆ[›¶İÛÿqaò\Hú­½òœ0Që%ÿö8Àn¥·£ìJÛ‡*Àï'wI´s--- FILE_END: ./palproj/.git/objects/9f/e657e3e681bd75e77f467bbd7f12fc5830fc25
+
+--- FILE_START: ./palproj/.git/objects/9f/1b520e5ff679795efa2d7cfce49fca5c78888c
+--- CONTENT_START ---
+x+)JMU044g040031QpÉOÎN-JËÌIeXùä}Cİ»ì7\¡%~SÚ_áûª*713O¯ ’¡«(¨Dm‚º¡Ÿœ`s¡\Ë²ıóä¡JŠRK3‹RsSóJŠõJ*J\m¾VúNäÓ{úQ•_=Ñå§«r4 så.--- FILE_END: ./palproj/.git/objects/9f/1b520e5ff679795efa2d7cfce49fca5c78888c
+
+--- FILE_START: ./palproj/.git/objects/9f/d7607df1bdd192a863f7809eee3136654792b5
+--- CONTENT_START ---
+x+)JMU045a040031QpÉOÎN-JËÌIeXùä}Cİ»ì7\¡%~SÚ_áûª*713O¯ ’áæşòû;#š•wœxÕRkòmÒ‡ïw—˜ BnfzQbIf~^1ÃÄ£_Y¤n§øÏTªU»:IŒOßúğ¨9E©…¥™E©¹©y%Åz%%,¼®Æ+º-lßÌ9Ñ§mUÏ¿èF9 f¨Bş--- FILE_END: ./palproj/.git/objects/9f/d7607df1bdd192a863f7809eee3136654792b5
+
+--- FILE_START: ./palproj/.git/objects/91/c5f5041adb644f99227d26d592160e2f3bc3d0
+--- CONTENT_START ---
+x+)JMU0´0a040031QrutñueàciqŒ,qYş¨•7·ÆçahÀ÷Ù· *sRs“2“õ2ó2ŞÌu=”•½Õ¯ÙşÊ³sº&;wú{C•¥æ•éT2øLçT—ÖÿÔT¸ÑFs÷Ò£Üÿ¬ª(N.Ê,(*ÒËMÌÎgĞa3°êıüÿÎÜå©û¤¿í[²ÔÄ ÊR‹Š3óóŠæ,‘yTUcÀÙ»Acû§yUaû–LÛ ßÓLÏ--- FILE_END: ./palproj/.git/objects/91/c5f5041adb644f99227d26d592160e2f3bc3d0
+
+--- FILE_START: ./palproj/.git/objects/1d/6c13e7543b90d2207faeabede47b7369df5d78
+--- CONTENT_START ---
+x•T]oÓ0å9¿â.­T˜”t|<1õ¡Ú:4`kÕ†§1Eã4f®ÙÎF4öß¹vš’B' O©ïõ9ö¹ç8*ƒ×ïŞ¾y18g\3bÊ @Rr†j^YĞŒÖÚğ{&ÜXD\]×‚h(¸`¸[2ÀFÍ¤…œã&«tƒPDæ j[Õ¸{¸ª¤u]Ü–@C”ÑwL›8VÉt™¤WÓå§ÙrFQ—Ÿg©_~a0»>ÿ³Š‹®¶š-¦Ëi2_îuœÍ¯“ÙuÒB "†AÀh©À£/–ó³³Î¿\-À³´-m¶à‚ãşıÎşÆokê¬‚3ƒ@Q¥¹´'À¤©5ªFÊE-”¨‘àrªğzJ²Áª—ÇT„â·Ò`*F9@K¢	µ¨VP¸ƒÅÙ¦bPÀ”tt<™¼íø~ÀC‰c‚Ë‹ÕGrˆ4D9G_OFñr ş°ºã|àgŠ$ıˆ}•psáĞ­„0™@ã5·ãğnoOİ|¥otPnÌ\ÖÌ/¼¿hl©$deTåxvg¢ÃÇqÕĞ8ï¬åhFÙ‚ÿ…-M‚Ğ’¥éÎ™8x‰‡¨×%xöŠÚp<•Ÿ–[g»)´îŞ¼zæ„á¸Çğ¿RlC†~a¢ ˜ÛÑ.O}šÃÌ¨~^oª´Òêú(6e¸SÊï8$Œ/`î#éSë.
+Î9¾ÔøØâÓğÑ5=…û¿ÅËûàx›v_¡Ävîi[;²_©>DâØ§9f2Aä<˜	çe’qÁm³ŒÉ­—r…Şx.æÈÖ¹{d¦¾Q`•w¾±ÄÖ¦mAwÃöÜÃc˜<’~k¯¼'LÔzÉ¿=°[éíè »Òö¡ú	$´G--- FILE_END: ./palproj/.git/objects/1d/6c13e7543b90d2207faeabede47b7369df5d78
+
+--- FILE_START: ./palproj/.git/objects/0e/048441597444a7e2850d6d7c4ce15550f79bda
+--- CONTENT_START ---
+xKÊÉOR01dÎÌKÏIÕMI,ILJ,NUHÎÏKËL/-J,ÉÌÏSHË/RpËI,ÎÖã «U1--- FILE_END: ./palproj/.git/objects/0e/048441597444a7e2850d6d7c4ce15550f79bda
+
+--- FILE_START: ./palproj/.git/objects/ae/c3d2bea7c047173747968b35062c88c97e4e6a
+--- CONTENT_START ---
+xK
+Â0@]ç³Jş3ÀL’	i+iºğöàòñxğò:ÏSkã©7¨Åjñ‰\¥ª[&ŒQLÊµ æ„A'­ŞÜdé ‹ {±ì³)hœ¯Şú`Ç¤FòÑ’q9FR¼÷çÚàÎó$<>¼À¥üàÖÈÛ×yàı
+ıH18B8­µ:ÄñØå¿Zq)°uÎ/õe=Gy--- FILE_END: ./palproj/.git/objects/ae/c3d2bea7c047173747968b35062c88c97e4e6a
+
+--- FILE_START: ./palproj/.git/objects/52/cf01933b12094eaec67245a6a812abf485c1e5
+--- CONTENT_START ---
+x•SMoÛ0İÙ¿‚@}Ø$r‡d(jì´¡Ø.C±]zª XÌ,D–ŠÎ†ü÷‰vš´Ã0 :õŞ#i¯|\ÁÍrù·8ÁïòÙEÚ é&†€»\Wuq,Š–¹?Á\hü`Qùt®Ã9zLõ(bqmÏZR ¦ï½kŒˆ©Ø0ò,1¡éêb'víü“Ä0‰l{ãİ5gù80ÀÇå™C[¤S/Òw‰1ÀM5q%•P0:˜ÁÇÆø6&®á
+>› +„ClìŒàg9·–$´f‹¹œÚ)Š‘A‰Tj¡
+¿\Ø«–;/z_&·ğ]²8;m@¥±®øŠ’÷Ó=ş%<9t+,PÏÊÓAOÂå@äRğiQ-¤Ÿâ÷EùsÕ¼;¡Ë¹ó&md%çÌ¥ZÎş]±§¸?èŞ¤²ı[¥2èvYU•ªá,!Â2!ëÍÓüšÇå8ôÿf?ĞøÙ·{(	»È¨µtYä?Õfw‘v†,Z‰ œêg¦ŞëõÓ“D¯º§ÈÊÔ´ØáKá#<Ê ÔÛùûw%¨òVùKŞ<ÅqôzÌ¿Ë8Œ --- FILE_END: ./palproj/.git/objects/52/cf01933b12094eaec67245a6a812abf485c1e5
+
+--- FILE_START: ./palproj/.git/objects/52/4ae1734d12460b6434e02f1c5068b25d46573a
+--- CONTENT_START ---
+x+)JMU0³d01 …Œ’Ü†“‚'rÍdƒn½h~¤X/2ñÚÎ‹FgÌLLòÒ3ó*ô’óóÒî·ç_œb.ŸWy„ûwqißŠ‹ Shš--- FILE_END: ./palproj/.git/objects/52/4ae1734d12460b6434e02f1c5068b25d46573a
+
+--- FILE_START: ./palproj/.git/objects/5c/64ff931dc3aa248eb52b70c59c3a7072f43113
+--- CONTENT_START ---
+xX[SÛFîsÅ‰'S‰)ÈÎ´è.)ihNim+ÈZU»‚xˆÿ{¿³Y’]’‰_ÀÒÙoÏå;7ßê~ùù×_¾ËTÚÌei‘e'øç"×F–²£ãwoT‰/æB‰LfÑ6Å[´@Oß>©*µ¡t&Ìq®«B,hŸZ´©4'…dà×‹ó,Xl'srÑÖ«@£eıg#ëÅyY5æ9–Üù—EûZ–™Exİ£Êç Xtl1ò“9Íy]°ö9/¼3ôNcÅû
+¹g_ÖÆÉíÜYµ7A|0Â4ú9]<„¶‚}ˆL=–lÊE^ŞëÃZŠçp‚ğNÁÒdC4ÓiS¦&‡["p„Í¥Öb*ù™IË ò¡íÄ²oà•:Bôq{Ìî—õv@pd"{hÅ(ïéÓU:…Fúq”åÁb>İ?—¤…ĞšÉÌÌöô"_}ÊéKûûû1û"úÍı³h—"‘·_=³7¨“—È©³«·0èvO›Z•Óƒ—OoøK5GËİ½±¦—OşÖå­K ë³Uş%¢ªàà£Y^dqß½:	›è´VEq¥*(µşüLæÓ™yE Á+È¿SÈ±¹Ùòµ,9eVHbsòrJ6K­?é$ç†2“yzÚ"ô¢L{ÆÚg«ŒÅƒ’ıb‘<ˆ¢‘‰©óyÜ±0ŸPìpà¢-_°?µ4M]®\¸tVğ«!icömgPçMŠ@¿(²î:*¤¨)ç‚¶Â6õb û^¢r¦’s3£…jj©iDA§ ï=½?|Cp`¥òÒ´iÂŠºâ[K]Á?7‹G‘šH“ÎâÛ1˜0æ€_>É2U™¼~~¤æFEvÎÙZŞvìaLöÛ‹ ™¨û¡ßXÆÌjõH¥|¤“ºVu|{vuuI’ÿA®
+í‚¨-Š{´vÕrƒ1™0\¢œ!-ÀG­ÊnpY‰õ(‰b€$¤ÏŸ)úC‘®dšOòQ÷¾ªe*ó™%(ÌíC­›9“Ö¹Ü±CÓÂ‘Ñ.’$ÑJí%¥®¦Øš>ôGG2±/ãÈºÊÅ†ïá è]èí V||ÆDµKGª)2*•!4Z”ä —Ğ%¨B0ÙÄTä%[Ù:Ûé¿Äûˆ/
+Ä³—¶‹'hˆ5İËÅfùÄĞäMTmãF!·,Ì Á ”
+j $Ï)‚eâÙç	ßg«­½+¢~ îf%~—‹¡«İ[À3î±œˆ¦0àöÒ=lµmİÀwë’­B]¢­ûÊ×8nûäú®3ßN ®Ûcy³(ÁÃ)$áúïŸşY…Ğ&)?:Âiä&†„‡™#7»qUò¤Ğ²)ÓÅŞ‡bîÎ$Ñ
+]ÓCÒf"§ª@Ø¤jQNåàÀ3µ‡5ĞêÚ:3‚õA‚u`{ç:Ü¡èC´§«…àåüØ•.O§şk7¤AÄ7Ê8â{AJëNK÷„ôÌæ×Ü¦8Ï8¥˜K_ä'T£W×K]·p6~C}l}wÇo<i`ÆSë"æÒÌT†Iâòİ‡«h{íıÊ»ÜÒßV	å²´­3›»ƒ‹„„_WÊ¼ë>Gn¯İ4®›4E™4…ï.¸ ñ#WzK Rw4
+Š÷ğ\šÖR–Ş…3(ï*{EQ,¶)µ™`#g;;‰	—È•jİ¢pø¯Ğ)ÈæÌqs§Óæ›‡c6·rŒY¦ò……æy(ãø…;Ö"¼Ş*õûİt¹e…hôòiå¼‘7¡š…%É=fo.ş¶ŸùTüŠnÎ.Z+|Ü':‚ÀcxÄ`ĞnØ[:º1ã
+Uï™Qãz¶£Npùÿ5ëÁ6x`H0bH×Ò€ª56ğU¡^oO—<HÎTËR¢RUS8¾„íìvgI‚Ÿ—vrÀ°‰qC8dU¹íËÜ£­€U­òL’(éğò¼-Uh×É4Ù&[‡0Ü„n
+,\n*À†ikf¹¦	Öü‘ƒM‘U¼L¸á…Ïšx@´ÅHÉŒÔ,à×Ê$¨Œª©çqÛ¡øcƒ³ôŸóo|Ä§	Fê™¬1±…šbtwO•C›„½ÖûIw÷åØªĞí±ÁÄvNº+]oğçi$WXÜWîf’sëv–a¬±ÿ$…,§üè§îU,ìŞ#µO&zş¶úå…ß‡K9¾èËsÕ â4˜€}Ğ5üŒ¦ë÷°æ^º‡ÇcÖ‹Ën‚Ì[«=¥z¾ºİ4«åddùÓ‚mÜUø;ñ5[ËQƒ6û£›»B”÷#ìĞVÄ3åÆvêĞ‚zË½±8è,ÍÁöpõ*¦İº£g†æ³ÜÆÆb¸Ü#Ë^u€Õ$YÊÛ&¯’`!M²7®Ö“¾ŞO>‰yf yfã±?Òœwv,'H°Ä&”ŸÀ®…‰ŞJ‚¬ÄOb°Û|Şÿıd¥Øñ˜4Âáì¦–•ªMb>4›nx õÆ_‘ñ©ˆ–ÿÀ§ì×ÿ ™`ú--- FILE_END: ./palproj/.git/objects/5c/64ff931dc3aa248eb52b70c59c3a7072f43113
+
+--- FILE_START: ./palproj/.git/objects/42/d87859b4fb56e34a1b733abb426518c91a49ed
+--- CONTENT_START ---
+x+)JMU0³d01 …Œ’Üç?ík¶.ıò5Ê}ú•Ù×îweüŞeh``fb¢—™W¡—œŸ—Æp¿=ÿâ„ëtù¼Ê#Ü¿‹KûV\|  ¿!Û--- FILE_END: ./palproj/.git/objects/42/d87859b4fb56e34a1b733abb426518c91a49ed
+
+--- FILE_START: ./palproj/.git/objects/85/348cb08555378197770fdc927c66eb2095b134
+--- CONTENT_START ---
+x+)JMU0´4b040031QpôŒwö÷qÑËMapõL}3÷å,Õ÷5ªıgKÿfØ¯9ækb 
+‰çLT²îïaŠ_òÊşîi=‡ŸW”ç³@IÉOÎN-ÒMÎÏ-È/NÕ«ÌÍa˜4ıó>ó›+«ä¦¶óûéï]ğÔd¥'Pµ¹©©BJinA|AQ~Vjr‰^qÃñ;ŸÌİÿğµM¦ûÚã«„::C¬ÍKÏÌ«`xÜ•}mvŸ®Éó¼¥6‹Opßœ#" ¡˜QÇ--- FILE_END: ./palproj/.git/objects/85/348cb08555378197770fdc927c66eb2095b134
+
+--- FILE_START: ./palproj/.git/objects/3e/4c4f8d3a2540574896d6e18e90e6b693b75f81
+--- CONTENT_START ---
+x-KÃ D»ö)²C*¨«ö Í¾7@|‚šÚ ªÜ¾uó¬Çnc'n÷Çe¯£®L`Ì~xëW4FƒT]ò` õ!5mP*Œñšha=_±T3ºôÜ0Ûˆ “x²cÆL‘8¦–2Ó©Šfs²nÃªw÷Ÿ'ûíRå,–t®¤*ß~Ş%<--- FILE_END: ./palproj/.git/objects/3e/4c4f8d3a2540574896d6e18e90e6b693b75f81
+
+--- FILE_START: ./palproj/.git/objects/3e/bacd568128e6613b9cd4e294e3255b51f0a169
+--- CONTENT_START ---
+xK
+1]ç½†tşÀtÚ'‰™…·wğ.‹GñŠ[­ó ¥İaôœB²Î³,Z›"QrğC´d
+Ñ¦ŒÉ±/êyÀ-c}T^;“‚"ë=z]TVÆÅÂAÅ"hÖáJuÎ+Ü>´ÂéşƒKßß·:Ñvô&Æ°ÿK8¢”RìÃŞ8ò¶ Ô¶£Á ~.–¥Š/ ôI¸--- FILE_END: ./palproj/.git/objects/3e/bacd568128e6613b9cd4e294e3255b51f0a169
+
+--- FILE_START: ./palproj/.git/objects/c8/1115c4457927364b82a577173f2e2469fc829f
+--- CONTENT_START ---
+xK
+Â0@]÷³ÊÌdbRqá	¼Á4,ÚVÒtáíÁåãñà…u§
+lğPKJàÅkˆ£f‡èÙE#VÉ,LnäH‚lëŞZÒREâ‚'1–dÔ˜…L6œU%pÒé^k›ÎSZàşÑÎñ×Ò l}Xç^÷“Á{ëN„ˆ]í±¦ÿê–—’B…üÒíÙ}m=H--- FILE_END: ./palproj/.git/objects/c8/1115c4457927364b82a577173f2e2469fc829f
+
+--- FILE_START: ./palproj/.git/objects/e6/83d7ee31ac0da513746a82f30cebd19acc9636
+--- CONTENT_START ---
+x+)JMU023c040031QĞKÏ,ÉLÏË/Je°óñïµRu÷˜víaß„gÛ&oo„ªrôŒwö÷qÑËMa`X&ı(ïÂ¢CÆ
+d7[OTÚk™hb 
+‰uv†ß6³îWñ·²ÎIMuïeÑ¾
+5&%?9;µH79?· ¿8U¯27‡¡…Ï"yuZü„'æßë^«¥ç*¯Ÿ¶¨ÚÜÔT!¥4· ¾ (?+5¹D¯8ƒA6Gøyˆõ„K
+õëV¿}R]œy?¶bmf^zjqIf~CÀ‡†î{V=8·$Ş)ÀÙ–¢&/=3¯‚!Èëa±¯wŠÉ}™€ŒM±náV ÑÒf%--- FILE_END: ./palproj/.git/objects/e6/83d7ee31ac0da513746a82f30cebd19acc9636
+
+--- FILE_START: ./palproj/.git/objects/64/6d3a947b557dcf04820379884c9964dbb0942b
+--- CONTENT_START ---
+x…“OÚ0Å{æS<Á¥•ÊŸ[QnˆMwQ¡¬(¨ÚSd’IbáØ‘íĞİoß±¶H­Ôyx~óf^8+sÆrùåƒ#{•9¹dèJê×ğ¨(%<9	Nàk‚)K™K¡ğ=TàÁä²}M¬nõ‘PSŒ—‹d¹‡‡xM°-jÃÌpË¼An´R3h#êjT×ôöBí³y´Ùßg\T&sòùßª5ìxg:ía:‹¼sŞ4¡K)«ˆ¾§Õ¾QÉ¼svîjai E•9ıuOs^x™ãé¸Û¢”Š\$jò¿Œ½Ü.Ú6T†Lğ@%q³sû­4¼?íÉNÿ¬!7MÓsjI.3:Á»uFø?ñÜIU$¼ –¸Õ‘”r·lÖ¦iMHÏ ‹1ÆQZ^KHµ1LÃV¢Ò£
+i)÷Æ¾ÅÖÿ$Xšöû´`â½a>%¯Äû/øV]‘ÃÇÎQÙ)•ºBA×Oÿßc<Aú*­ÑiŸğ¬é«hZöÚ”ï,aõ¼Á…Şúûıã6ÍXÍ¾¥/	ÆoüRd•1•¢L´2ã³YM–ÆŒ;¤ÏÛÕ:ÅÏÍñ	/ûÓ«õñ´Ú‚K±]ÓÃgì8ıH1c'øºÙ¦£Ñ}ú<ı-÷şUXŞ&8[YT4úQf--- FILE_END: ./palproj/.git/objects/64/6d3a947b557dcf04820379884c9964dbb0942b
+
+--- FILE_START: ./palproj/.git/objects/7c/dbe2bd53b11ff5528208911c0704bd19ed5e8f
+--- CONTENT_START ---
+x+)JMU01d040031QpôŒwö÷qÑËMaĞY©Ï½ù*ÓöæÛğ>)Ómæs n5“--- FILE_END: ./palproj/.git/objects/7c/dbe2bd53b11ff5528208911c0704bd19ed5e8f
+
+--- FILE_START: ./palproj/.git/objects/4b/f51a8ae9f3b6ef21f3661adb660d54a22f60c4
+--- CONTENT_START ---
+x›ßnG–Æ÷šOQk	%H´“x0İ,I¶µ#ÛŠ%Ç;,ŒY$;jv3İMÉÌÅb±ÏË}ºy’ı}§ªº›’fg±KdwÕùós¾sª|ST7î»ï_ıñÿô×«ëã×îäÃûë³»ş÷Ñè­¯ı·kª•wU¹¨òrá¦UÙú¯­ËnªMëV[·®«_ü”Ê™k|»YFûû—ñÓ7UVíï»+ß¶z}³æAwqñÎ/²záİEV.6?¼«f¾Øc—¹¥v\eÓe^z7¯j·öuS•Yá6·fşÎÕzåËvbûUu›İäEŞnİU[g­_lÙw´ï$K¾Êê­K²\WÎ—Í¦öEjÏV>cÙjîVù‚Wsdh+Wúû$C3±…ŞùvYÍª¢²µİÙ¯·-2.Ü}^îF2—è2swyÆÆoòöíæíe›™_Õ–ï6ŞØß?­¦·¾6ƒfèY7ûû¦ŠŒsÕfí¦	
+œlê5‹m|3C‘jQxw|yînıÖ¤—²éÔ7QÔ×›V
+^Y)ó¿Ë¶«”M´Rd®¨¦Yq`?¼Á3sÎJÎJÇí]Ô¬¯åŞfwŞ5Ûo¾)mZ­Ö…oy="ªù!ÀÊÔ¯[7¾¬Nö:é¥~áÖ’¥_Ysë²õºÈ§Áö9“Xì>o—‘“%62óœöwgå]^W¥PœÅ•”Ÿ«úV¦¤J÷éfS¶÷s^·€ô.¢küó»=WoÊ2=éŠlİVë ü3OİäµŒhï0{g’™¼¯A‡¹„4)JLƒór^gM[o¦æ£oÜ©Ac¨Å[ÀUX#ùğsÄX»ô, ½¬š6nB(	 ­ö…	"r Tùìoğ¾—a´¢éÊQ—İ‡/e*-?P!¼|å§›šØÒÛ8 Î²ÂIQmfó"iŠÒ´JŸvã²rëÍuç—.›Í .Xü×u%ÀÍòšˆæuµz¸ÿ^D!iÇ¢$ÿÍ@bş!Š‰çœ„B$†–dR¾Š/šßzœ5Ñ‰C#ıL
+”'¼UW–¹>µd•ßô.áü"„´i›òSâ$½Üg+b[C;³FˆiŸÕfñ×Õ4ÅõşşŸ	Ş‹ôÍqí3iõŞcSè[ğÆ]òy5Ï§¹¶±°ä—q†2SVnyĞŞ®Šğk¶MëW+ò[ï>\aLró\l†ir2sZª9ÿv¥üjï{—ëØÔ±s^´by¼Ë]Yµ®ÌÊj4"YMoİZ©fôİÛ‡òAU"kã¾q×KŸ×.:EĞn¨ïAĞW7–	è/ÜGA‹TL®ùºİâ+ò†ùğÈ­sm¿ÂnX—ğXøÉècUø#ö'SŠŞV›z˜n(pˆIyXSß¦„AÊ›ìãî«º˜¹1PêÑ¾7qçò°@wùÏóÂ7nüöúİÅ;¹º:pÿzµ×ã[Á™©Tâ-¢4èŠ[¿n„¨û¬	g³m™­Xpâ©_7¾ÁŠ Â$”.'£×ÚõhTÊ /‚É$2¯•í•Ş«9!â~ òpã”é‡–Ú‹oÛ;wcı?_lbAT,íˆ,IÊä903è“¡!ÜÕÕ…ËçTROz|Aøã>)TPN0às÷¢Ïöú™ŒvN5¨çÙÔóû¹¼Ê'L¢0½¨ùôïà$DCÿîf“Ñ¿™‹Ûšc¸˜±W nˆª%öÎ_âQ½ã(ğ@!«’,›×DÑzÓğú»µÍRŠô¥`hPãó’ªÍ§Û=VÄU½r&3kEK¼ˆ;ñÁå2ÆjSZE
+)4.©Ôğ«Ÿ.Ü,ƒ.	–#—Yëˆ‘¶ª·½rª‰%°üŒr%›¾zsP_‡¼òFûT5Õ9‘Z¾Ã™ŸÃoªÊ½#?Ì‚}£x!($ëL‹E’JTP'_Î|IòkB€*,¨Ê¹Í¤ıÚ‚-íúğc7.ĞªIŞ^“§ PÌ‡¹" Æ.0n³VëÅ÷‡7y	a<p—DxuÿâÛŸü|à|;Ä„ŒÉzky¡ÉW95ğàï¨‰øZˆ){y;Æ³j<:pÔitÔÿ/Vs•èÎ`Å¸_ásòDRåÆx*7‹ÀÌ›u.²7ÀËA wx„‘•[WYÉK!5PºİÔe	ÁRZ‘ìps½]X±IËQBìSòÇ¢" q2Œ½r1êYXŞ40>–yh2J6UrèS\à1Ø\3­ó5Ğ™BEì+Ø#¥‘Ô}WJ˜CYú£ú¾ç¡îe7ªä™q|ˆ0Õ°ñ“í
+:ğıÄ}¨§KRXL­–¢VV7O}<¦¸`B4ñ¸®„…€BêIê8”¨\ ÖOìj•Éå2*ô¼U·cNYgÁıK,R– ¬\Z™ù©È]ÄG’ã@«PĞÍÀ ÷â¯hÂä)k„´Tú–zz»Ñ“Ññ®à¸ÅÌ¥fñp¦ßPR½€Êm›ÕP³Mí¶Aÿ Uu_º¼©ÆÁ9 ?—ğLœHÃ«–ˆÕSFÓGÙ&£ÈJÒ‡'émÑ™˜NIyIåï(–R“Ğ«ïTnY=Ô¾N ˜Zs í
+›‚kıd1¡kÛõÑ‹s5G_HGzùòå¥ò i’:l›e'.¥ã-J¾ooä-t7nó”\Q Û/UlíˆøTRg˜ÄLûhdåy-Ş¿%óWüÍ	©æ×âËìæè¯~øşÿ 6è*˜P˜}Ü´†n”*™´>g4µ¼|lİê‘ûP’	$[ ŠXğ@3ÍŸ^º±àöêÕVß^__BâL;AjZPĞâÇ:°8ª`‰Î
+ß»H&ŒDªƒ`H£íÔC‰R§„6ÜHÒF::½‚a÷m—€gÀrğ…É(m/*øØ|-e»¾l|¿Ì§Ë!†Ñsˆ¦2µr2¦¥Sö…HÚ»¥æ Ãoi½íNWçÕAtÖ¨Ñ@Æ¸q`QÊ—Æs14›f—ÓÓêJ<ª%t‰=Šã_DàD5y;[2L¤f˜¹;	déu#ãsZÍH_'£?L\lõOèqº¶ˆ!•Æ#â¡{˜÷<h½;H‰#ãª1vkúPÙ*“é2÷v³°†ùµx¬W¢# t6¸¯6"6¶B…ıé¬Q%fi’â½CS4DH+Ã8d°¨µeY¨ÜÁUÛ×Æ?&{·ğƒdO|)ŠÕ—˜§¾ûîÕ¯,6‚Š{J'­ÏH¬s‹,5äs=‰„&ìÖûu¬&âºÁ]¶–wÅ‰b4÷¨¤2
+Š£DÆzqb"ñÉ‚ÿñ"¯ñÙ×Ló'9)~öbô·ßÿûo¿ÿ'Äàõë9çúÏ»ÿ»ÅO£­kEïÑbˆgXïybCûèåÄ%;ÒË†ôN<8óİË¿GİÆ&á)m*=?İx«C?©+/'“XüôFI«Âj(Íó>Yö|i°ÚdAä.J5şÿ{î¬+ĞğÄ5Ë€òğd–	táÀ}ù²ŞNÉù/_ö?æOİúÏ›…¾B°¡O¸…À‘t-+Ç’+&Ï¿Ä÷d5ë³;3¸eŒÙ\[YèUó¾ÌKP
+~7ÆüU9„ÖÀräPÕ:}BœlJØ±Z'õZ&+if®ªE¡Ç£»B4M¬Mò°$rû${ÍúAÊ6ä$²\NO#†gLv>Ù3¡¶ÍS$‚6š™LxâšBòÓñ©Å{VšŞŒùUuÆ¸F”B³Ü½t @ş0ÙjO"Ñ ÍªCŠö¶¦ş7Â,‘Ó®\Æò1ş[Q½Èèé/7µ:rg`˜bC&ÅUqÀÎÔCN ÊÙaeõ<”%+0fáaYNdd°i™ØcóA3,ªÔ…šõí| $2R¾:)­dË[œôâšÍy#mù3
+ñtÁMƒPàPá@=Ÿ—¦MàÒ“0Ø@Ó”!ToÁÎ0ÆºöXoE(e#üMèn¤Õ›:9BhŠ„•úK{õ#cöÚ8H†OU&VŸ’‹ÓdÙ^€wY+wÓØ?Í†şü‹ê7²Íì,”Ú¼šø`c·{0ó!“&¶é gÖ£a aÓ•xœ ¿Óªüv-©Unf/ıfaœ`ŞêmjË'£;‚´ªèl½_5'{İ­:fœ„×~šƒ#+òšÎ­òß9å…NE<‡<Ò8Ît¬Õ0VÛ˜†ô%]h­µœ_İø™†&Ì‚T”-6x^œÍ›©|Ä2LOb”Ü–Õ=Ù„ºy¾£<OF,'miNwÜ{`Ws°@šƒ„£æMÖN—‡¸4 `J&e[šĞ5GF±ÀîHœA¥Ğ°Á&gh«ßÈVZ% Jjåü®Ó8dÄ¢Ê(ÙÈÙë¿ÏJ›Î‘Înê\>Ğ)ø¶'Pƒ4ØÚ@0¼¥phf˜˜¬!2‘NrU×î£œo³¹‚¿Ë¸Ø±B¬C †á— ­4@{½ùÆ¯àËrSª9:y$CöÆ>Lp³°Âú0‡iuäŞ2”SI8ÑIÆvÒĞX}øs‡‹q*$ÿû<ºgeÎB‚›"ÏÑ çS•E
+¤Öqf˜¨ÜÔÕ-´tfıº|JÿÊ4)×K“òƒÍ4:·$À“Ü‚²xŸm)3—zÍ}wDóŞ¡Ö¸œ^’Éz~äIàkµİv£“Y'ÄÖ|• İ"5ÛD…ˆ£Æƒb¢CaÃV~ÅÈ•<C]¶å]‘ã`úfÔ±¨ÏGO1Ë5`G5,uf™èLœâgÇ7n’Çcz`?Èmƒl¨Åên±ÏıŒ>L‘`©ÕMEÜ¼Şà¾…ÈíBšâ~ë'©
+Ó3³‚q„¾Æ„}BˆU¿«ØÚ˜P+àÇ˜Ğ»0¶±Á³!ÎÃ©İ1§œÚº_ªÅ_H)âiYU·4xÚ•)~ì†İ66{J¬:Ìè0WÍ¹FLšâ–£Ö7ê%•Ú8pÃ‰sf¹K³TvÃ°HÅŞ3ó¼x|÷dşì‡øad®†DiŞ/À{S1å÷4Iúò‘bz$~Ó”¨	G€–Æ`‹ ©1sOCÄr<oGÂ' aø1ßª®†tbmalMm“b1ÄKÅ·Yætf‘“‡ ›†7ÏßŸ\|:=Àh	 xêd¹)uÄ”–ƒG‘İ¬ÈyyãÙÁêßÊg¢>ÜpÏ¦Z¨™<]"kÜƒKar˜1VÍÔ’p•$(%î?¾ÙºËNÎN?}<;p¯?½?¹>ÿğŞ€ÖåC“ô†Îö–B	ëV™Q
+¢kbê?%U û ÷‰Õ«©A˜Œ¸’aÈ¤#CíkØ¼t:è½°JO£¯ë‹›÷Q,PËeqc	œ‰È…ß37/21E»h 1…É[F96ÌÔ¹	İ¯ã˜³T©\-	!ìÎÔdXocö¶MèÔYK_v%ôğåËWºgóŒnœ }¨År-f¦=Ñá,çLFÇß¨Ò”AWk×B¦\µ@AÕu±Ö Nœ–+.0íR«‚èz'ÅÈA*wÍQ¬{Ã­õ×3ÄÌ
+LGä‰Ç¤F8zOb›ÎIR›³*¶ë™ÜÊ±¾ãa¶ÀÕ½=:;ØIà$†³>Òj™¿Sc2ú°i…ÔjİçLßî9XÓÀB½‘bèC“5-Ô ‰KUL¿C3šò›òÛ-¡–~ä~ÚpÇ‰|õÑ7´¦Ô×ñ9à7°@3 ¤×0G9~H*¯¨D+a¾44Ke,RµïÎ»A-fÃÀ¡›U
+@šØ³ôÉÇp6î†İäéû+]8°vP`9ËÛğ ÙšÔoÔ‹~SlË”õêá¯ÙìYGä+.ôï€m¦· °ï%¢×©ç|ªFc“,ôw{r2YâQM)ÈB^	çNMEèöRC¬ U(ÈŠöˆ¢ù÷Yvï?Ç#6§•ı#gí9B0°®Ït°a$¼]¦¥dÖ5è\	x7ÅFSìAÃ<}†>_…NcûÒ¼shxº“Kë$K÷3
+„M­Fæav4BÒ_ËèdŠ%ÃäÒåëdÙ®tõ
+%rD–{DÒ–0QLu‚Äì2Îƒ[ie[V¯«L€X_OFŸñJc¾JYLOµ\GK‘â
+ĞEdˆQôgbí³
+<W5Wx¾ÃœÜ¯a±v!'CSÎx>›éÎ‡“ÿË3êB¡¯Išãhøs†tÖm0`×ÂÆÿ¸D¸±¤mt†Õ§·0àE‚‰dªY‰œS8®ÅÄ
+}ØÈŠ‰bF}Á“ªêÄ•¥»'ªƒìšÔæÃŒ½hì.»LÚ§ÿî£!§|Ôˆ»qó§Ämú0$Xv¥‹y3¾8°Â!Ş`Ä[7‰
+ˆ/7ÀÆ Ë^èd%Ÿ¨ZÚQjú©,Ï¦²¦}&KjÓ`Áî5İ¦è¸Bªƒ‰Â ¦ô*×\á­i„´× İûÿEy
+¹Sf¦Z¸G×Äp1Š‡[ Œ<ÑØèÆLWË‰.û²¢¦v'<‚‘ûœúxî%^ŒŒnû ¾µRÕŠ+Æ+ú…fL$î°îS~‰p_.Ã+ªew>S,S‰’ÔL'zò¬kU,]óve~”"‚³cIæx"»w´·Ò)†5RíËloŠ›×z=tıé=6R¿íñ´Â–
+ë{§ƒ‰l%©v‰q\'Í»í> “Vòf<öBoêDoÌf"í¥ÆÚÜEÔ¡UàBK_¬Åò¹~|¯l¸Ãd¤uˆU}ZMwôğcüœæP}n3ãŞ†K	; ˆÙÆ;;i”}ÿ$B²)¶™…¤â®°ê¦RF°$¨xmlUF“a<>JW²/ÈÆ‰+¤áC¼•WĞjä?kªÊAê¨{Ë?AxØ[à`–#õyĞygĞjYdw
+!¹W1&bJ‡¦6¦¾Àq¹™Ñr®”}Ÿ·I/f¤……‚¬TŠÃ¶:ä¯0aÒ HI'I“íEšò)§JëfQUÕV·ãÑ§êã¡/¦‡MWT5ìMĞnÿÒ@7Mÿy4úëÙ{ÆVé+ügã]¦--- FILE_END: ./palproj/.git/objects/4b/f51a8ae9f3b6ef21f3661adb660d54a22f60c4
+
+--- FILE_START: ./palproj/.git/objects/f3/137b977db4b73d6753683e466912831426d9fb
+--- CONTENT_START ---
+xMJ1F]çµ†ÎOMAdpåbT<@MRqí¤IW/¼ıDàî=>|©ÍóUÀ„éN:3J:³ËÖ$è082\lØ>#¢v“‹Å«…:Wd-—L­§B~oCÉ™1¢×ç¨mLmri4_¹ÂÛUxÈòØ‡¤u—Ú¼£í Ú»¼)ÜëišÔÆGáÿÕêcÉ$Ïß´~-HƒÔjå$¿xj«|v~}ª(g8>ğ*ĞÛ&¬nrwZu--- FILE_END: ./palproj/.git/objects/f3/137b977db4b73d6753683e466912831426d9fb
+
+--- FILE_START: ./palproj/.git/objects/3a/255da661005f94366d947879fc1bab19fac2f3
+--- CONTENT_START ---
+xVMsÓ0äÜ_¡i†`ª`'4Pw80pæÂ‘á [²­©bI&	ÿ§OÇÛ‚¹T±ôvßî>¹²D›Ûlû¢”ô„ş\!øWËÎàšì¹8è“âDÜ M:5S¼¾wïŞ1Ü2Ş´¦@ùzçW÷D5¼+Pæÿì	¥¼k
+´Éú£_*IõĞ(9tWRHU UıÎ>şç¸¶İnï¯ş^]­+ÀB –
+Øöäˆœš¶@wY:5ÖµuŒœ³eê }‚
+mÓ!¥T”)¬åƒ.Ğ‡Y±n	• On‹¨¦$¯²ş¯ó×o›ß v°F2Yv»+í­aGƒ‰àt©baÊ¯{¸”ÆÈ}l4@³ÊpÙ%ö¶¿é­{â”ß°-Ğj)8E+JihÌ”ê¸gA»Gîíô¹%}˜¾™Ø AoŞ‚Nğ¦\÷‚DEwlG|‹'˜Xfkd‘D‘¿˜ª…<`°â(ì¬[g¤Dİgú:ÒÎbúiM¶Üg«ø!¸å›¸<;zÄsf×ÙKÆšŠô*#Ø.x·°”…À°]ı>’rV‚`Šº@µ`GÌ:z@©¯Ò ÊH%NÎ¥¨eŠİ r0¨‘’BÊ•ÛQÊ#Ñ$¬ƒÖ£¡»‚Õí±é¤·(V6ú),®¶™„?¿Îìã›q_¢Ìf ŒÇQZ— õI¶ŸuSOƒ¥Y¸\•GS¼Û…!÷Ÿö¦Iã]?@òAğà±/›/ÕXO¤}¶}å\ñs`*&Ë	SRîw.$g!kU8Íüšò¯˜æ¿?„ÎğŠøFNómŠ‚µv\Íı2{™4®&¨¾²ì}=:~h¹aAäÒÉn²’¤MªAi{«ô’ÃÕKë˜å»˜Y£àJãv¸BgceëFŒh¨–H­FA½ù¸`â˜‡NìïæÔ³×5ìúGØ–:rv»\ŒégeZ(în7k6[½„ÂXğ—ÇD”Iº“ÙÖ;3èY&Â»F&_ÚùpÖÎl}Çö^#·z_¥~¤Á$ú"…³to¬àVu?b¸IôtüÎÊ.Û0ZÃ^s”èİ*50µ{œàYÿ‰ÎAö˜óÙ/èşüÍ˜õ8CÎ]îÆe•TÄ›Ğ›{é”‰ó.öÁ·Sö{ÌBø­èÿì--- FILE_END: ./palproj/.git/objects/3a/255da661005f94366d947879fc1bab19fac2f3
+
+--- FILE_START: ./palproj/.git/objects/9e/417e1028e7a5e30b3000d8bdf5a21dd5c1e3a0
+--- CONTENT_START ---
+x+)JMU0³d01 …Œ’Üç?ík¶.ıò5Ê}ú•Ù×îweüŞeh``fb¢—™W¡—œŸ—Æ0mò‘Eknk÷Ç®z¥ûmÏÙÓ¹¿Î„"ô--- FILE_END: ./palproj/.git/objects/9e/417e1028e7a5e30b3000d8bdf5a21dd5c1e3a0
+
+--- FILE_START: ./palproj/.git/objects/9e/4b3415dfc5751b6400424dfb60083affe9e719
+--- CONTENT_START ---
+xuUmOÛH¾ÏşCù`[rM®ıOMC¨¼•¤:Z­íq²Çz×¬×„ñßoÖv—ÒD
+ì¼Ï³ÏÌ¦R§ğiôùó…Ñ%’× ÊJ§îàíå¬~”\f+,7[“ù÷‹I'Ú•bi¸Å­Ñewôú°ºö<^Ut	Æ/‘±Ğóá„[òaªU!–ÅZ9û8k%w¾Ëy1=›]şËN&‹É×É|Æ~Üû÷±øPéÚ.R©ã££]Ç¨„Ñ*^¢ü“¯ìÇ|vë‡¯ã÷t7“ùüŸëÛÒyOv=_îİ¸W“Ëé>ü®ÖÅídú]^ŸœŸO'‹óë«y[ò)—Ô.Â¼©**¼kn”PKÏËSjjr@8„ŞŞzd8‚<íÄB(¤ ;(/u‚Ù3/+‰c˜®¸=µÕfz]r=y·áØúˆœJ ÙTË¦TN{®,.ÑDPQr³a¸I¦Á°u¨©º3ö«ãÜê*øt|F )y*1iè\›+ÉŸ/ñmÖ>Û÷½RmWiE@¾©õ÷^VP"K¼u!ÜpAÊ¨š'*(Ç‚7Ò&ÔzÑ¨,Vz„„µC‡tÀ({ej”EšÓ´QPø†=&/Î%ŠîÆÇ£û×†MõfCQgşí{÷ÅM‡ÑÅÀ?òCÏÕ´B)5[k#ó /©/Ç?sªn¸äÊ
+7Fÿ‡Y?î0©ªÖÂ®¼)ÍOYò”YB¯OÖŸ¶‰¬ÙtÔq Â•¶D:/3HĞ2.e‚¨Án*‘Ñi@…6 ”°‚KBŞ6´‚ø	¥®JT6j1ïÂ¦%sâ Î›Ì-‰6ºé9)(¨AúÑªÛ2ûQñkğ›ŠÖS>dº,¹ÊãAÔoˆq„%¶E=6"{ ×/i"§Zkå[JĞu¢ ÚZkÀgš«}¼7Mw”éÊßMã$ÏiX3šIXuC	Ô©ÙìŠR¸f­„ˆ:$Ò~ÎßÇ¶Ú}r»§ıÈa»›©¤»|hwú~­Ù\d&Àvı»WahÙªëšë3Æ<Ïƒ]™ïZ8¨…ú©é øŞ Ù€Õ@C&
+úoEk+Ï‰´ñ‰û?˜§ş¹ûøÑ9Ç-—v¶»›7YF[¤ ³¡[VŠøM£T7İó@Á İ½HTÁ.køÚŞ†À:†^ÛînÆğ²³¸ûøçıOüê·ás†•…Yû‡:NôØÏÅ =£¥Lyö@Sq·ıÁq;s¡. Ñæ×.gNL¥à+İßñhäyDÄík
+I>c%Š1¿ËÛî‰†v8¦Í²İØ¬ÄÅí—â¸—?¡`£Ğû«Ò¨™--- FILE_END: ./palproj/.git/objects/9e/4b3415dfc5751b6400424dfb60083affe9e719
+
+--- FILE_START: ./palproj/.git/objects/17/39b39d5bec23246def2f3c35866a6b0ddecb4b
+--- CONTENT_START ---
+xTM£FÍÙ¿¢äÉ!‘–ñìa6#”c3
+¼`g´Š"ÔĞ´hÒ4ŞEùï[İ€M²£$>`¨®zıêÕGZÉŞÿtõá»ÕQdØ¹€¦Íó jV ;Z*¦±Óp‡A—2ÏE&XO&62{A5ÄØèV*m”Ë›+÷æji>ìï¶¬…R¦ñ„›+Ğ2Ùh&ê(«¾è™X.W–æğ¼¤ Ü]¡Î¾µ*IŒ·²o4È^AÖwZÖæ–\zVêºrW}§V]ÉhÖJ8ÃoÖi¦Eûm ¹¨°³ˆêÏR½ÌRgm›ŒV¹€æ”"°‰Ît–KÒ¯Ñ¨œ³™¬ë—c‹ïÙ¸p¢NĞú ¿Ñ˜ö¢â.	D&ºjUÕMµYËº•¦z¬›-£-2äŠd1UÊh²!*Ö2@q¡0ÓR½Ú«ß(ˆ¡0^:èmĞ‰S$˜ü*qDÒŸÓ£dMüĞw˜÷ğ^‰¦ Çÿ[GëÍQ(ÙÔØh—rõ¿°º%Şæš¼×½Bğvğ‚¯ƒ€ ÷axø	Y“_üO.,_©)’BÊ¢Â„µ"!ß¤D…K‚‹ü]à­}x~Ü?À§ğ·Ş¼ (oïGï ŒàûpILàî1ğ--€ÍmòÆ{xz¶<y[ß…–U¬ÑB%ó#ÂˆfG$ˆ:Çí¼8~£ßÿIÀÓç_DñgÇ§ğ™¨Şù‘ÿ´öcøÕ‹½ÛÀ‡»(ÜZb¦?xú·‰¦.Ğ…¢zí°ª5Í8Ì5£ú¥şŒæ	»Á-şÌÆz.úHrG¹ŞG~œlngYğÔNÌÄ¬¦N .¼MŒÀRyÄ†¾!•Y°qy;xÒÄHt"3ÿ¿P†ï7ÍÓ„3ÍÜÕ‘©U%ÒÕ$ŞÕÊr;Tè4µán[Ğ¦ŒÆÍ¼Øtÿu3XY¥Ë¬ÄìÅt´©oØj!Z³i¯fö­äöVIŞgÆ§BvS¯›míÂoËõvãÄ~,ßÁ²-ÑÏWpç^4?xºü}¬]HGV¹p}‚5ÊĞO…Z	ê'¸^,ó4iL«oè@®h(R%x‹Å¤·Yi“Ô”ù¸"Íi¨}ø(ìâ+ÁWİ--- FILE_END: ./palproj/.git/objects/17/39b39d5bec23246def2f3c35866a6b0ddecb4b
+
+--- FILE_START: ./palproj/.git/objects/84/0e3863ab665f90e437f77eeb26676d23af96bc
+--- CONTENT_START ---
+xÍW[oÛ6Şs~Å;`P[-¶™ŞÜXM‚:±ëK‹nÊ¢-"©’”cèßáÅ²”8K¶=l/uxx®ß¹8ã2ƒ:ıåMÕ–­¨O V\ÖùšEû¦‚rK`%ÙĞ¸uó˜CµqŒ+)a‚ªT²ó"Ès\
+Ù‰21Ô‚S­ûÚÈª¢yP–Dä1xı jáèTl™’¢¤Âx› ^ÀgYÃ-ã¥9	+EÑ û×(	5ŠÑ-S0L7TÀZÉÎgáWª$,T­äD™$Ê›cµ\
+mT½2L
+k©¼ §w-9—·g!Àby}ŒÓÅä}rÃ·œ'ËÑ»ñp–¤í«¯]Ps+Õ»qHU¥z‚,bÃÄ]'şÒ
+÷Vòºô™ó"‘ãñ¿ÌÆ:¨Y=¤*lîÃşMaJGµV‘. á£îJ*Ó²·wú*>}Õƒg¸c­ËiEE®S)ö	t.c€¯­§.‡˜ŸÓWU6™¶„q’qÚX{ ^@¾o%2 ÆâAûZI•’w;<Ø°¢p¯?«Gœ"¤8ñG¢i™›û¿Î˜uñHÏ'“óq’§—éûä³EE—òíŸÑ5UT`Â–(fıõ Ààù<Lª ŒQ,6®Çp:MGoÓ‹É|æîÍõğ*‰¡"œÃTŠ¾¥yÖeYÎ“Y‹¥ÆŞĞe˜çóO“ÙÈ:‚ÊöŸÏ÷b‹¶K…Š8ßÛê±9+°‹üTLÎ“ÙÁ·FÄƒû{>ÎxÏÏÀØr÷ sï¢õø!Õ:~MoËÛ#˜?Ä½‘(iˆÀ÷ĞÍ¤)°’MuÀ->ëôƒJj³Áf¿~Ó'¼Â¾ë"r¿	Ëø¤N8ç³dnA ƒ’†å^üZkXÚqk#Å™ø Ô¼šÔzGXgY´÷ïì…{ùt”pS¬
+ººÙ7;Ÿbø­wv5êÏ/’ñ¸÷zÕ&eçE¾ƒşòPÖèç‚7­÷{@&á1¼ÙWa%•5jh(~æh¤ØÔ5)îfoãéQqµyı3¢`©™ØÀê‡¯›;”h†Æijjß±Ít£ÑıìdwŸ4É¼—ïÀ÷TÚÿv¹<€EcĞÿ-¯; iŒü7Á”#HqÅ¸7œ:ãõÛNØrÜ>“3å:êì®3’«ªÖˆ w~'{ÔAÔG”%kaÒ8Ã}i%sü)°c²ãÍ.)Q!KŠåX2*¢r—~!yjãO}{ê+ZÉ8¬O—ëpv'ä?Ÿ™üù¡Ø$*xs¸ÿG°ál2JÒY2à,]\ÄĞ£ß­ìz~¹¸X¾M?G{9ÇĞ+Œ©tEfŠ:Ã…¯Œv²Æ=–*wèÛ¤Ø|£‡bŞá€m²ïV£×g»{MÍ4»o;î.×`uà^]IÀºRl‹K·{ÿAö÷jg
+)ÊR½R¬2ƒj‡2’;RVœ¾²25áûW¸Ñ¬qŠåøªe´ÿ ş/@^¾sšMÖ&¿ÖÊ}=µöJßŒÕ““6:m›ß¾sô‹ª2Åò=9iÕQ{Z¡®nw…ó}c·¯ï4Lıx;•hvc ogİ§ãñU`h,ôïş×ªLÎ--- FILE_END: ./palproj/.git/objects/84/0e3863ab665f90e437f77eeb26676d23af96bc
+
+--- FILE_START: ./palproj/.git/objects/84/8acdbaf700827d345a15924217b2d140232037
+--- CONTENT_START ---
+x+)JMU026`040031QĞKÏ,ÉLÏË/Je°óñïµRu÷˜víaß„gÛ&oo„ªrôŒwö÷qÑËMapõL}3÷å,Õ÷5ªıgKÿfØ¯9ækb 
+‰?¢ÒßªX(õº†GâÊå·Ï>ön†“’ŸœZ¤›œŸ[_œªW™›Ã n¹ynôe•Ü÷ú6¦mYÙ¼÷N{U››š*¤”æÄåg¥&—èg0H.{İ¨ı|Rwó­ÙI•÷ËÄNıî†X›—™WÁàt£"rËï°Ç^ÒÅV»R%NJy¾ Te`--- FILE_END: ./palproj/.git/objects/84/8acdbaf700827d345a15924217b2d140232037
+
+--- FILE_START: ./palproj/.git/objects/d9/bf77dfb9588323b8c8ea847d34f692f0f7dda4
+--- CONTENT_START ---
+x­VÛnÛ8İg}ÅÔy¸JÚİ¼UQ5q#77NQA@ĞÒÈæ†"UŠJâòï;”äk`6ÒŠrfÎœ3Ã©ÔSøóàİ_äFK^İƒ(Jm,|qŞzU?%—é‹ÅÒdòõ<iW6í
+13ÜâÒè¢ıôºkuÕÚJ®féœÅfZÏ$²*.–‡æÜ4ë'¨®˜ŒvNF•‹†/ÏœÖWXU|†}˜,*‹E÷éy¼,!ns
+S¼@ÆBÏÛƒ‘Vp)şAhÂ	B	8?¿ğºĞx)Ø=.è]E¨„Ñ*š¡z'WW'çC–ŒGìlø£z"¥-ìÔfw%¡·ĞµYfß¹`s4Øx@?¥Š\|O®/G—'ØöÕ¸©Ğİ-*(%Oq®e†&r¡CÊ¥¬àQH	92¢Ø¤,(…ßC:C÷fMòoK£{ı˜ãí¤=‚ï˜[>åÂ‘V¹˜Õ®TZ9¸£´Y¹õKÎN‡?Øqr“|N&CöízäßQ0y¯Ô•$rö÷Ÿwğõ“ñ˜fß&Ãk?|¼¶?N&“ïW×Çdóé5›Ó«Éí¿êã2¹Ò~ïµØo®“£3vqu<ú2:JnFW—“&…/\Rú°“º,)‘
+8<r£„šy^6¥$×2	—Ğ[
+$†Nn¹Ù´!ä1æB!]²‚öÂ•‚á/J‰ƒ¦‚§¢²Ú,B/%™V›KA6šaK#‘Q´v¤e](·;Rghúa7ÇíøÆÔ6¼«(ª!ûõàÄ%gÁûÃÃ°ª–’O%Æ íÑºBÃŠV‚»^oğÉşşÔT[FÀ•Z;±¾~Ê
+rd	’İ#„ŞĞf(š
+(Ãœ×ÒÆ”z^«4Rú1	k'2ÚFŞKÃXP¡Ì;ÔÜA[¹ÿÁi¦C<ØÌ1~vG¢Í¥ÛÁáÁİK6“êÌ6—Z³ğ£O*úäÔbtm1ğ÷ıĞs1ÍQJÍµ‘YĞ…Ô…ãŸº­>Œ9µP+ŒşÓ®aCR–o xv¾Á»ÜlyÉ¦Ìz³îkéÈšEKÂ\jK¤#ğRƒ-£Æ„®çØE)\›Y Aî:QÛM	y[—MkRñJ]¨l¿Á¼½vZ[2'ê¬N]Óè5Ä“‚.5H´j›öÛN*~~]Ò€ÉĞ‡TÔò³hãÖ3Ä’8
+Â„› ~Ö"½—/íôİÖ£V¾%mF@M›º˜Ä
+ğ‰tµ¾o'é–2mø+5&YFb¥QF[Qej« >²f…ˆºI¤µÎbßÇ–Ô	äfÒú}‡íJSq[|h¦òº­¼!³Mr‘™ Ûæïæú¦e+T—%×yŒx–«0ká 6èTÓBğµF³ «D&rúßœÚV–Ñ<¥	àLÜñƒ9pªíì£ŸîpÔpie»Ü¤NSê"9µ˜UY)â71Œ\ÛqAÑlÛâø JÑ³D¬¼†/M5V4yeÛÚàyeqûöİİ–‚_ü& |J±´0lş¡Œ€=ÖºØ@Ïh)§<½'UìÁu÷á¸ºÁ¨s@c´ù5Ë¡[¦Pğ…êwxp°£Q‡Úş‡§Pİsy3šåA³µìòùÿöîpUë*ÑëBì^FôÌ3z¹N;İkƒYD/…&zwp«wt“À•şv•¾³Úzœt•%Ä½¤N¢å®ı•T}HF{E²¢VGO˜uÿp·l>øV—´ ¬ïV7F¡	õ ï1XÆ¸f}—ûÒÜ½c\xÿ…K·¸5ı©VÔ#]ãiùJO³¦âKÌ¨õ,Ÿ£@oBŸ±Â½‰™ß2­™5MmœÖ³fF÷aNˆıƒ¨ù%æ¸×zL8½ÆFá	--- FILE_END: ./palproj/.git/objects/d9/bf77dfb9588323b8c8ea847d34f692f0f7dda4
+
+--- FILE_START: ./palproj/.git/objects/2a/c1de4d32ce954584a2ef3862eb5551459c49f7
+--- CONTENT_START ---
+x+)JMU026`040031QĞKÏ,ÉLÏË/Je(¸ÆUöÕÔ H'éÙ·®M†vSÍ¡ª=ãııB\#BôrS\=SßÌ}9Kõ}jÿÙÒ¿ökùš BbAƒñdù¨æ‚‹omzûóKbÎÄÕÊQPcRò“³S‹t“ósò‹Sõ*ssRr­¦T‡Ögib®ìğ™™r{Ãm jsSS…”ÒÜ‚ø‚¢ü¬Ôä½â†ãw>™<ºÿák›L÷µÇW	ut†X›—™WÁàt£"rËï°Ç^ÒÅV»R%NJy¾ ª=_ˆ--- FILE_END: ./palproj/.git/objects/2a/c1de4d32ce954584a2ef3862eb5551459c49f7
+
+--- FILE_START: ./palproj/.git/objects/a8/b567c0f334f010c878c895a4f1fc995be1b6c4
+--- CONTENT_START ---
+x+)JMU026`040031QĞKÏ,ÉLÏË/Je°óñïµRu÷˜víaß„gÛ&oo„ªrôŒwö÷qÑËMağş*Õõòó¶÷ŠŸÓ¤n§ñ†,ÒO8bb 
+‰w|§õ¥Ü~Ããò½ç×‹‹É’M}¢iPcRò“³S‹t“ósò‹Sõ*ssÄ-7Ï~£¬’û^ßÆ´-+›÷Şio jsSS…”ÒÜ‚ø‚¢ü¬Ôä½â	Áe¯µŸOên¾5;©ò~™Ø©ßİkóÒ3ó*œnTDnùöØKºØj·SªÄI)Ï· ³´^Å--- FILE_END: ./palproj/.git/objects/a8/b567c0f334f010c878c895a4f1fc995be1b6c4
+
+--- FILE_START: ./palproj/.git/objects/c7/dcf237c1c5bfe1eb3c6947adc7aa12893088c3
+--- CONTENT_START ---
+xSÁnÚ@ìÙ_15HH•9Um#(*m‘qOi„Öö¿²¬­İuJòï}^CÚF­Oè½ñofœª*Åûwo_õ^RÒ£TØ2zHJ²°™¡ÚÁÈ¬1–~Hµ‡"ë,„R<]7J¤¤i¸R‚Fj‡œø%W™=S	£j\İğ‹Œ!ƒ¬Ò®EíÈ•È”d–­0iì0–É$NV×“øó4‡QavõeºòãƒéüòÏ-Ûİrz3‰'É">A\,æÉtt`Æ0dVVğì7ñâÓô"Áå×ëx•Ò!ÚÃŒø„ÿ¿Ù_L|­mÒ£$-Eµ!íÎ µm»–UlWæP²GŠôUáıÔbË[o­EÆ¿+[ËŒ„BV
+#2ÇnEûÇ†ˆÜ¾–(è°+9\Í–cÎIäˆ¢ıÁ·³8G^à§‡å†j|$Ç2§fŸ¨ßRÛ[„ıvb<F8×äFáÜİ·qjl©ÚTI7Ò
+zN({"Uf%7xêÌÑ¢ı‹’y³­Wµ©¾³WC[†ÿÖ>ˆ/|í|3ÛPWúUnÿşyÙû÷-è1<EüV)^Ÿ’{âC£ı&îhY=Šıjîß¤BÎb’sÏ*¡7ü¥iÎ”so))r{¤Òí¤Ô‡ˆòJË«Ìj]‘ö/--- FILE_END: ./palproj/.git/objects/c7/dcf237c1c5bfe1eb3c6947adc7aa12893088c3
+
+--- FILE_START: ./palproj/.git/objects/b3/d530b171ee7c13694096f1121159108e7b9899
+--- CONTENT_START ---
+xKj1D³Ö)zo0­‘Z!†œÀ7hI=XÄ£	9ÛGø^>ª^Qyß¶:`!ó6º26ä„ˆŒ:zïq-9.>;'iÁHI«~¸K€!Yk
+'Nˆ¢­&ŒÎP™µ%[JÎzŠ«qŠã¶wøâ­Jƒë7x/OøìòqÎûvæÇhocpŞ'ˆjóã×lu)j«£òÊ¿çÎZïÜ
+Òk–CıƒYO#--- FILE_END: ./palproj/.git/objects/b3/d530b171ee7c13694096f1121159108e7b9899
+
+--- FILE_START: ./palproj/.git/objects/8b/662d79f6b8507e19bab116a72a16560a9ca965
+--- CONTENT_START ---
+xKjD! ³ö½´ıC³Ùæ­¶D58¾EnŸGeQT½·hİÓ^Ì`‹ä„>µÈL¶Vt*aô)&_AK²åÄ7-ªVútŞ—d’×Åy«]Ğlœ‹
+ƒV]‰5	:öÇ\p§ŞxÀûx.p['äÇ5Ï~¥ã”71mPÂEI)Å)ÎÇÍÿ«ÅÛÈ‹éÁğzŒ–ç°[çylhî3òªí‹Å/¿Qº--- FILE_END: ./palproj/.git/objects/8b/662d79f6b8507e19bab116a72a16560a9ca965
+
+--- FILE_START: ./palproj/.git/objects/70/d60a76f53530722c62e6f68ac082313e789537
+--- CONTENT_START ---
+x-Á
+Ã0CwöWz+,a‡í¶ûş $©›†uöpC ßÌôò„„âÊÑÜîË`Ş{]˜ÀûßBZĞ{£íFÉÊ	ìYCjšr´˜óµĞÌz¿âV½.t›¸¡„Œ ƒyrú €TK&Í_ÔŠ0}‘ªiAJˆ+n`ûvÿüó úå5`--- FILE_END: ./palproj/.git/objects/70/d60a76f53530722c62e6f68ac082313e789537
+
+--- FILE_START: ./palproj/.git/objects/a5/60991724490139ce16ca214cc1416b1b925e1f
+--- CONTENT_START ---
+xK
+Â0@]ç³d&IóÀL'©fÑTb
+õöàòñxğd™çÒAkwè-g`Ã‚c„)ù¤-id²uˆ1›µzqËµƒsÆ™ 5k’)æ‘ö6Z2Ì#“uÂ’†)¤¨xíÏ¥Áç’+Ü?\áœ~pm;Èû$Ë|âõämĞp$DT»Ø{ş¯VSÙ >JİÔªvFß--- FILE_END: ./palproj/.git/objects/a5/60991724490139ce16ca214cc1416b1b925e1f
+
+--- FILE_START: ./palproj/.git/objects/83/fd570394567dda31831ff2288343339305f2d3
+--- CONTENT_START ---
+xœßrÜVrÆs=Oq"WÙC9ôíf‹7)š¢,îJ"MRv¶R)œg`bc CŠ¾H¥ò{™§Û'Éïë>ÀPÜl—K"g€ƒ>ıïûºOC7eu¾ù§ßûÍ?üëåÕÑÅU8>{uò/Wÿ6½Éëü«&4Õ2Õj^«y˜V«6ÿÔ†ì¦Ú´aùÖuõK>åƒÕ,4y»YF»»çñÓª¬<Üİ—yÛêöÍšÃÛ·ïÂømVÏóğ6[Í7?¼«fy¹ÃsBzâ2›.ŠUn«:¬óº©VY6MnOšå÷yY­—ùªØóªºÍnŠ²hÃe[gm>ä¹£İ YŠeV?†$ËUòU³©óÀFêœGåËV·aYÌ¹µ@†¶
+«ü!ÉĞLl¡wy»¨fUYÙÚáä>¯[dœ‡‡¢,Ãd^±—Y¸/2üCÑ¾ÙÜ°{éf–¯Ëê‘ï6îØİ}UMïòÚš±ÏºÙİµ­H9—mÖnßÀñ¦®ÙfùïÌØH5/ópt~îòGSnÊ¦Ó¼‰¢¾Ş´Úày™­¤şwÙc@+«¦H»s)²PVÓ¬Ü3ïß †™g)cø¦ãã×¬¯åŞd÷yh6ö¼ÛM‰hÓj¹.ó–Û3yDu»ÏÿøÊ4_·a|^ïtÒkûe¾ß°–4ıºÌš»­×e1uİx˜ìÀbE»09^ #SÏ«Şòádu_ÔÕJ^ŒÅ•”?WõT-—Z…7›U»	?u»Á‘ŞEïÿôn'Ô›Õ*]ÊlİVkßü5Mİµ®ŒŞŞù4æI~d6çmòï0Óà!MŠÛÁéê¶Îš¶ŞLÍF_†WæÃ]¼Q \úÉ†?Gk9Ë¹K/ª¦!”äxZ—&ˆd(p	ßÊÏùÖÏ¥­hûÅËÙ:&{ğ/¥*-?Ø‚ß|™O75±¥»ßb€:›KÇeµ™İ–¦(M«4ñê0^Ua½¹Á²áô<d³™¨–üÓº’ÃÍŠš‚İÖÕòéów¢’v,JŠßÌIÌ¾Q!D1ñ\RˆÄĞ’LÊWñF³[ïgM4âPI?†rÊcîª+Ë\Z²Êoº—p>ğ¶İf„ü”8‰A/óÙŠhÇÖĞ“YÃc:ÏjÓøëjšâzw÷OïÛôÍQgÚÕû•`˜R_Ø‚79Ñ%›W·Å´Ğc,,ùeœ±™)+·\hwWå÷k›6_6¡,îòpq|‰2ÉÍg˜ØÓ\dê´TsúÕRùÕîÿê¾ø*ÌÑiàÉÅÊ½ÍÈz„ä}VUVÙªHVÓ»°Vª}3Aw¸Ã1ù Z!k¾W‹¼¨C4Š\»#ŞãAŸÂ·L~.äZ¤brÍ§ÇÑ(Ş"k˜ÃÑ Ğ:Óvñ+ßõu	y>]Te~Èó‰À”¢«M=L7 bkğ`J>¼I?á¡ªËYãJ½·ïLÂ©¬€X ‡†|“ßeŞ„ñ›«wo÷Âñåå^øãåNïß
+ÎLP‰µˆRß+fıô¸'zÈê™ülö¸Ê–¬F8qÕ¯›¼A‹x„IşYºœŒ^ë©‡£•zà*“ È¼V¶Wz¯n	‘ğ"7A™~¨©x·­1A±·a¬?‹ù&¢biKdIŠP&Ï©AŸ±./ß†â$ÍI8ŸÔÇ Ğ ‚pr>}¶×Ïd´SĞ ¾Í¦9¿ŸÊª|2G%
+Ó·Õ¼˜ş?ñhèã?ÜlŠ2Ú7ñ±¦‡Ï}w1e/ñº¡¯€–<°7ş‹¢è-C™™î)dÉÒyM­7í±yÁ6¶YJÑ~ã`|±µùôq‡ÑEU/ƒÉÌZQñI|°g9ƒŒ±Ü¬‘üA
+sĞ¿üñm˜eĞ%9åÈEÖb¤­êÇ~sB†ÄX~\Iç?_şpê^_{^ùAÏ©jĞ9:"X¾å†³ü~Ó€*òÙaæúVàß´3-7J:lZNuÊW³|Eòk<@ †rn3i?µø–úôã0.ÙU“¬½&Oá@1FÏ5vr›Çiµ»S¬ Œ{áœ¯ÎxüñO{!o§“ø$yÆdıhy¡)–¸÷7Ô@"Şæ1e7"oÇx¶BK†zõÿK†Õ­ º3XqËİ/±9
+y&)Šr£<ÁœEÎÌu!²7ğ—=wn¿„‘­Ce S¬ä©Né¶S—%KiD²ó›«Ç5+6i9Jûœü<w ÁØ«£~‰åMãcYÏC“QÒ©’CŸâœÄ`Í´.Ö¸Îê(b_ÁFR÷}Un€°Àf©wŒêç=÷è(»;fÆñ!Â a“O—Ğo'á¬.Ha1µZ"ˆ»2ÜlrğñpA„hâq„y@!x’*%ªàÔú™§2¢\J…·ªvÌ(ë¬$¸‰ e	ÀàÒd–OEî¢$9ö´
+€nhpj/şŠz!LÓ†§¥UŞ‚§w[=mYL]*÷gúMªÜ¶Y€šnê| öïRU«P4•S`ìÌùøyÏÄˆd1¬j‰X5eT}”m2ú¨$½œî‰é”Ø‘—‡JMBœ^@¾…ÜÒºc_'PL­.õ
+›‚kóÉ|B=Ö¶ëÃƒƒ[GI‡øúë¯w,•ûN“ÔÑağmÓì$¤tÜy‹R`Ş—7²{7nóœ\Q {^Bl6Ú'ñ©´a³İG%+Ïkñş.©ßMñwvN ¤š_Ë³›Ãß½üîÛÿÅ¶ñ®’…é'LkèÆJIésBqPËÊGV­†³™@²9QìÄ‚šjşğuËİ^¾üÎÀñÍÕÕ9$ÎvG"HE´ø±
+,¶*X¢3ƒÂ×ó`÷’IçF"Õ.Òèqª¡D©SB>HÒF::½„a÷e—5ö,pËÁ&¯SÚ^TüKÎ–×ÚlW—Åt1ôaö9ôº2µr2¦¥RÎK‘:vêk¼I¤õötªº\DÇadŒv¥|i<½Ø4½¼zU]ŠGµ„.±8şY~@T“eĞ³%s/`"5CuÈİI M¯3ŸSjFú:ınb©LÓ•E4©ÔİA½§¾ëíFJl¡W±ã¬é¬,³e&ÕeáÍfnókñXk®DC@é¬?ğPm E<Ø€
+ıSY!£ f©’â½ó¦¨O+Ã8¤±^kË²ĞjË÷qì¹Öş1Ù»…Ÿ¤ »âcY.?Æ<uøÍ7/¿{i±á[ÜQ:ióŒÄzk‘¥‚Üb®'±/Âîò|ÑD\×5ÑekY‡Vœ(FóÀ–£¡ØJ¤­;&Ÿ,øï	¼Æ'Ÿ2õŸd¤øÙÁè¯ù¯¿şå?ø_^¿şg¡ÿp@ø¼ûï‹ğ½øiòsíè}¶ØgÄÓ×û"1Ï!ƒıìæÄ%;ÒÍæéXp–w7ÿ%îmìnâW	´A:j~ªñV?z=©+7'•XüôJI«Âj(Í}²ìùÒ`µÉœÈ¯Tø?ıï‹`Uš'¡Y¸—û•1X&Ğ…½ğñãúqJK.ÿøqg°ğçü©[ÿÚf^WÈm¨î p$]ËÊÒcaÅ´Ã£Ó±Á=YÎºÅì‡/‚)\€eŒY_[YèUñ¾(æ¼ÿİórÈ[åÈ Â:}BœlV°c•NªµL<VRÏ\¨E}¡'gï
+QošX™”Ã’¬ÉÏ ÙkÖĞÚlCN"ËÔD^Ñ<£³óÁ®ql+Š§H­53™pÅ@òãÑ+‹÷>¬Ô½ó«(êŒv(…z¹;é €üa²Õ9‰D6C‡íOtM5üf …Y$"§\íGø@ ÿVT/rjúóM-Ã	>L±!“‹â
+Ğ3xÈ	Äj¶_;,À˜†‡°œÈÈà¡«Ä–hã˜š!¨‚5ëÛù€'2R¾*)­dË[œôâšÎ¹ÃA[öŒB<¸©Š;TP×+Ûsé‰wc:áÔepô6'ØjÆXÕñV„R:RÃß„îZZ½ª“!äM‘°‚¿”qdÌ~w{‚€'Ã§*“@«Îóä"ÁÔY¶à]VŠÃİÔöOı†¡=ÿ,üF¶™Eà¥Ö¯&>ä°±Úİ´ùI	{è fÖ¥Ş€°îJ<NÏßªN¿]IjÈMï¥˜·ÌZ]¢MeùdtOVõ“½x€­çşåpgÃæd¿wCÇŒ“²ñ:Ÿø‘¼ºsËâ7BNy¡Û"‰Mí8öt¬ÕĞVÙ˜šô+ªĞZk…|y“ÏÔ4¡oäR5P¶Xà©yq2£m&øˆ0LMì1—Ü­ª²	tı }<OF,;m©OwÔ[`{çøiÎ6o²vºØÇdxÛÃ™’Jy,Eèš#£°[Ò¹1@
+5¬sÆnõyÒJ©„‹’Z9¿ëvì±¬2 ¹!{ıw~­vÓÒœ³ë:ºÉ{rÛöj‚æ¶Öô»ƒY&&k™H'¹ª+÷ÙŒo½-¹Ì„ü>£ábÇ
+‡ğš_v‚´TC‚İëÎò%|YfJ˜£“G2d¯ìıänV(C_âÌŞ ¡ ­Ãšr‚„cd|o'áÃŸ:¿'@ ¨ùßçÑC”[’»)"±z1,X[6Æ˜ŞQ¹©«;héÌêuÙ”ú•nR®4&	ä'SëÜ’€;oLrs`ñ!{fÎu[øæâ½óZãrºI*ëwô=Wâ¾†íö4*™5qBlİŞB%(·HÍÖQ!âÀx¼˜èPØp Uá¿bäJË¶üÀÇF—ä8˜¾)u,ês‘f…¬â¨æKZ&:üìø&LŠxŒ@¬ó™mµXİ-ã¹ÿ€Ö‡	c-",Xİ¸,âæõóu,Df—§)î‡±~œP˜š™Œ» ô*ìBDı±õ`r@­€ç¸	µmk¼Ñâ<ìî”9åÔ6üRİ(6øB›"UuG§§ÒeÁ]“¢{Œõ«öêª9×ˆISaÎr`›Q¿(ájcÃ#ŞÒË]˜¦²šE{cÌôóâñİ³ù³?zb‡‘™¥~¿nÜ«ÊÅ”İ/(’ôå—"ÅÔHüìİ”¸ -Á>æ.mcwË9ğ¾MÈ?qš·ÂUO'V˜­©£­3Blb"šx	|›EAe9¹7x¨ßyúşøí‡W'¢(-9(–:^lV:b÷MÈ—äŸEv³$çå4È›— ;ş-óLÔ‡ùğbª…šÉ¯YãÿÁàr)Lö3Újx3Xâ£$¾á(qÿñÍc8¿8;>yõáâd/¼şğşøêôì½9Z—MÒ*Û;€Ö-˜Q
+¢j¢ë?h%Uxó ÷‰ÕT LFÌƒdFCh2éHÇ¼ö5íl^{Úë­°LW³=n×+Öï,i€åÒ¸g"rş{nËLLÑäFtaŠ–V53unBµÁíæ$á#8Áh‰‡p8Q‘aµéÛBwÓx¥ÎZúz¿ƒĞı¯¿~©9“˜g4qÂî‹e[ÌTç5Ñş¬àLFÇßl¥'(ñ®$Ö¦…Lµ`ƒÂu±VwNœÍ1&,WĞíR«‚èj+ÅÈA*5wÍP¬»#ŒƒúñŒ13€éˆÜ ñXƒÔGoItÓIÛæ¬ŠÇõ†Læu8Öwfs7 ¦îõÑéÁİN'1‚Õ‘†}dşn“ÑÙ¦•§z¨uŸÓ}{à`MÕFbˆ^‡&mZ¨ABT½½MùMù ÛÇÒoÃfœÈWyCi
+¾Oq~svĞ(éÕÌQRƒçà•-‘ãÊ}˜/ÚR™‹`@£ò=Øa7Şc‹™áP°—`³JH{’>¹ğ³ñ0¬&_½¿ÔÀ•ƒr–£¸¼5q4[sÀ‘úõ¢ïã‡¸ƒ)öÈ”uëş¯ÙlŸ^GäK† ú{ğ=Ú»·xa_/š—ˆ^§šó¹z˜›d^ßíÈÈd‰Ï06¥ y%œ{^í¥‚XªP	ì-Eó'ágé½ÿ‹XŸVúœµç®ùº>ÓÁ†‘ğv‘ JÉ¬+ĞñB¼ëb#mìIÁ<ı}¾ô§±}iÖŠ9Ô¯îä’‡u’¥ùŒÁü¡††‘y˜ôcL2L.õP>MíR£‡ ”ÈYî I„‰¢j´ã
+?°aœ'Sie[V·&ğØ¼Œ>ÈÅ=”Æ|•²˜®Vv2–¢+<ğ."ƒ@Œ¢¿kŸUøsU3Âó‘æä~‹µy„‚œq}6ÓÌ‡“ÿópÁeèÑ!IsJ“Îª¬qlÁü÷!"Œ%m£3¬>½yƒ—-L	³98®u01 ÷˜(fT<“1A…„—–îAé5mÃèêC½h<]w™´OÿİGCNùY!ÆŞæO‰ÛöCC’`Ù¥ó:f|Ã9
+0ào0â­I¢âËd¾§6 Ê²:YÉ'BK;"JE?ÈòbZÒ kÚÒ¤êìnÓ4EÇ:
+Lé·\3Â[Si=Æ Ãûÿa+²8rf&,Ü¡j¢¹ÅÃ,PF'OÔÖú€1SÕrâ†É¾„¬¨¨İ
+Wr_‘ƒwø½Ä‹‘Ñ=Ş·o¥Tµd„ÃxEQìŒÄ=Ú}Î.‘á`æå2°-S»ó…b$JRÓ@êÉ‹®T±tÍ=z*ıß„˜+¹¢q,ÉODbõÎî:Å°FÂĞf{U¤Ø¼Òí^õ§ûxê¨ç…”¡)çX÷Ì:>Ò•¤Ú&ÆqÔï¶y@:­ä=õxì†^Õ‰Ş˜ÎDÚWjk3‹¨C+çB‹¼\‹å3~ü l¸Åd´kU}ZM³ºøsÿyU@õ™fş2¼ñ¥ä;x½¡ïl¥QCø'’NÑÍÌt—ŠO+c»	ê¼K‚ŠóhcCuäãñ2‡®¤'"4ÈÆ+¤á,Nå•”…ÚÏêªrºåÔ½‚eöæÌr¤>÷=o5Z-‹l·@!ä{Åãi"º:Ôµ±ı pğËÍ‘i-JÙYy—öEï€”£°ĞÑ€Ë
+Rì·Õ>y‡I %x$M¶€4ğ)5§iJk²¨ªjÃíx4Ä©êxè‹íÃº+B»o·74iú£Ñ¿¼§mÕ½¬0z}ÁÏA¿=z8:»S1·ªfŠğˆFñ½·iuĞmî¼„	k@EÏ„?)#CøÕÏÉÊGu€˜iván6å%j¥qvšNâÁt8U"Ñ€¾†h¬í+%ÇD£"Çµ¨’>’$Ò-z¦ğ(}4‚&ìy)4í"vsqôf†/ÈQ©ÑìU	çI_×UXxx¨SÛ	hCf”jÙ
+r+‚9(ŞvY(oÙaÆ,³¨…Õ²;.%±½KGÇE.JxÑØ’7Ù0‚&_§§‘ÆÌ çzêøÉÁÔf‰ÓöêÆèŠ
+İÏà°Q£1[AÙ6+ó^*NõdûøLJJi+Œ/(B6s‰h}‘¼g¦5Å¤S'üÀ²À JzD!,­7mU°Ifƒß)dâ>¦ææ“T¬@mÌÚD_Ÿğ0{Pfg{µ…i±N_Wùt±²×Oô‚Èô]Æw[5Óİ“ÇzÒOÒL!„?f÷Ù¥´Eï›.*Ş ÷pjGºe¬Q©/¥°4™é‹’ÿéè}*–›%no³íæ¬…R‚)euH"¯›7Vª/osŞj!‹‰Ã1u¯¾Ñ{›·ü-Œ8Æo™ñJõÂ'Ÿax#(¶f¬»İíxNHr°iêƒfA@XJ>ÇõÌx­Ğñ5×_Ò³¶!¸Á•L>ù4ÇÃy†¦¤8x"ü¤s¬(İ}8…ÙO34Íè"‚G›&½DœP‘´oyAo÷àgÍíC®?6cS°j››‹üÿ¨\C4&¿àPlë“5·`6Š[(Úmá§¾'áóF–z\/!»b8oÑQò–’œ|,ØFd"U)ˆÌ'VaÂAxi³Vñ§g¨;¶ ei#s6öß¹êë.(iBÛ¼¿ŞÄR şh…ÌiBQ^yéô}—Ñ~Bˆ¥%Jì+10­”lÙÈâŒ	Õ}\[kê™B{ßÚ˜¨]¸Éó&İši˜>Â¼/Ç"±b
+pxíCÑY€Ø‚²ÖVÇt+Fé·ERoüÜ^BJMLCÛ>r9V>x­lÿÁ³½ş¥ÍÕĞ÷ª(í­7­gáÅ÷uõ Öh2_‹¥ò€u8# W¶Ïoû3òÃo8^§Mx9g
+L`CuÀ@¤¶Ó£L`h¨ğ%Ê®'ëë½p=y°?[û³¸¶y0Ÿ;é¨´6_ K¸ xBĞ†kô3hD±IDŞÒ‹çı¼seçx.‚Ùå•b{ Ø-–¼êRÉìàÒò‚ìZø}[GÈ)?hiêBW`|­›ÃŒ§”[ì’™äİ/Vû¦Váj?™Q¦I´,¦Vâ_#ŠÃàĞ¶ q^<Me{/ÀëuÓ'¯»+®ÖŞK²³wšw64ï|¡‡x¯ÚºCóşqO'<À>Œ¢.íOr§	ºT¨dj]ÆUXOÆÔs­ÖÈ[ä#J“İq¹rÜ•2}¼¸7ŒêZzj:÷#‡ÂÎˆƒÂ<ÁvJKF…½¿`Ìfú½L¶ŒBŸCQwª—EÄO¯1ŒÏ/vÂkG íhSÆl“WáìäAàÃßŒr8d0.ËBœõªÚØL;-‹õMESÌ"ÂâÎñŞôš|û¸ÔAø¾fõHL*ŞbÜœÄoµ[ıÚ}-X¹ÖÚ×A9br#Lâ{ vÏÿİŠÕ´¾FYîO#ĞÊqB[W¬\ï¨xÑÈÁ1ÈJÑ í¼ ’ Æ,O¹’ñ2–oG9Ô{
+ö!¦ˆrœ2Û
+v!ÙÄ]7CÄÎÛšôu/xÂqh‰“)Ò9­„±ƒe%/¬ì]¼?/5R5LÆöxPšCÜÜ,)Ò$¬‡—ø±½…D=#á,²•'a÷½’‰8Ñ§te*0ducŒWåWRÛl‹zL¯	‰‰ç³‰¿¼üZxñ*1Æ!¬ÚûÍÉv‘ÁâÄ(@hºGïGÖŒ¿òŒ¦Ò|^Ç9Š,t¼Ô²[³* Hì'Êû©?Oókkãè Zó=†Æ”Fví,Ro„<KÇ]Ãƒò¡ÄG²Iùh²¥Ş8î›N‰¤snOi†<4pC?-ßÒt<ò.Ø[’Ñ}bÖÈ¿‹¦šœùR˜‰¹pª¥ó :ç©»dÚó¶”.¶Ö¦;[•œËk+Şü½&¥ÆŒOîäó.3w r}|öêäãÅÉùÙÇó£«7×ñmšs¼—bCáÈXáˆ~ñ¶ø&µ‚ÏüA	0½Ë¬1	µIvy.2w«àäÉæı:X5^¡3eMµ)òÉ:»}%â'$"ıº+Û~j«Áµ¦S–îm@NUlùddÒŸŞãâ`ĞÚÃJşêZF^bi8iOù2)O©^@1	zíÌÕ ¸´I'èÚ¦º;É´¨ò|8g”­jªõB##‚‰K¯#ìõá¥¨¹Â@éEë!7êÕ\Æ(†¡§¨˜İø¬…‚×ÇÈi,?#Ñ8”‡&çI0¡ÊóÌ6wğÎº^`
+ìa‘cÜşeÖÈÄğ>¤CÂ§Ú£¿˜ÑU4@H²ôO aÕº}‡ˆü¬úƒkì5QğÑM–âP»Nc"Y ZÑ7£@Ÿ^ÿšŒ~?Aÿİ¿Ø`oækQ3ÁëTÚ¥R/RÏşhF´³iŸ6~ÁÂ7üdoä9BAÃ4.“BÎ*¼€ôi}wİ—‚RŞP8FÕÃ Pò…“Ëu+s¨Áx…öÈâ]¨:Ğİ"†ı‹z.ƒĞuŠBMªV`0ß_Ç'½Ù?ßàÃ`]”óƒeÿañ7N»ï 0c3çµ3­ÿÙÑ‘fZI­Æ‘$\ÓŠï;:sSkğ@:|Ç¥EÜ ~YJ¿×“aÅPN•([Ó¨[o3»âñ…¿®÷”÷ô€“î”Ş&Uá’ÊÃÅ„ÿ+ı+aûF†y5LSêü­k%õè¿õ˜--- FILE_END: ./palproj/.git/objects/83/fd570394567dda31831ff2288343339305f2d3
+
+--- FILE_START: ./palproj/.git/objects/47/b7c808b1ab5ea071dda06a458d32a3d894b68a
+--- CONTENT_START ---
+xTMoÛ0İ¹¿‚õifgé6`Û@Ña—µİZ;*«•%O¢“ùß’6	Úm¾Ø¦(ò=>’ã0ÿpòñUy|~uvûóújM}TÆaWU†6‹ª>~ÊI€l„HUvw{™b§#+Z¬²µÆMç<e %´ìºÑŠšJáZKÌÓÏ[ĞV“&R¬æÅ»m(Òd°¾‚´‡kïîQ|;ı\ÎÆ³1¥Ñö<š*4"çl<.'K!Cˆf#…ráÔ0ÁUzÒˆª,‚Ú¢Ÿò':Í¼¾9=‡«í…ZaL_˜Œ_
+‰p^%É90<íìcÀFP>Ùvb&×İ¼ÑMéĞ1d #ÙµŒ@ã¥íSvõ4Òµx§áZaj´]X¸`p½Â,Â¢œuû‘Êc80¢Ò¶ë)Åş¥$üMñ,aîúüW90‰3
+}•İ€Ò)4è±(Š¼ÛpÕßg5«9EÚ‡“’,z".i,K@«¦õwş†›˜®œ.ûwØ•³I‡¿ÈµÔó¾3N¨—TkNjîÂµVg±¥¼¾K7à’o¿á†89ÀÑÕ“ƒ€Î»•-8ÊÉ¾å‰ rÑœ"ê¶E¥á8.{ÉIÊT¹g$Lú q…«,ÂŸÚg„–ï:¯Ü©êÄx´d[´‘Î•MåØ–Šõg|œ¢~óC+ŒâîµÙÿ¡ÜÆşC…óÉE,Ì$…¥gŠ¿…ú1®Š¸
+¶£´}óH}u¬Ê˜8EvˆµĞ&Y¤g4x‘_jßñtÜSAzİ/«Lt]qÏH¸É·Ó¸–˜FZÀ o©
+--- FILE_END: ./palproj/.git/objects/47/b7c808b1ab5ea071dda06a458d32a3d894b68a
+
+--- FILE_START: ./palproj/.git/objects/35/2603aaaec0ea3e0259453f8e38feb0a50f4e0d
+--- CONTENT_START ---
+xe‘?oÃ Å;ûS<%C¦Ä‘Z©s†M§v®=l›³àœöã°£Zê¼÷çÒóOÏÍÃBtìv‡fWU‘ÂÍŠª|ëüOŞ nĞ-©EéµPlñ	ÒØZgœîñ–8±¹R˜=Å=rBÌ¨=6ÍQ5ÇM>”Øâ¬Gtœ˜ù%š#„aØ‹v>± nÜOÃœ^öîq¨KšózH&«jó_œ2>óä<˜)
+ùëÚ‚^Ó:zUO1Ô±ÓZQg5-Šgğò~~…u=ÅBô$ß®«Òõ8~.j‚lq"›J„¾§s¿³œúç…Âş¯†‡!VÕºÂÍsú
+.MTáÜWKÕ/;™%--- FILE_END: ./palproj/.git/objects/35/2603aaaec0ea3e0259453f8e38feb0a50f4e0d
+
+--- FILE_START: ./palproj/.git/objects/04/4dbcc818d31219514badf413f32ea0aa4c2fd4
+--- CONTENT_START ---
+xAj1 {ö+t/	²Ö^ËPB=æ’öª,“z7lœC~ß%OÈqFçÖÎhHo}1£2FõæIæB¢©j¨L*8Z¤CÖ2 »ÊbS‡¬œ)†_¬cöœÆ˜…U*b½"%'÷~šø’v¶	¾2ÁGyÂç²‚Ş¶:·­ÜwàSÈÌ!"Á»GD·Šõ±ÛkµÛ—õOn—ÍÏñ°?èÉÚÃıàJ6--- FILE_END: ./palproj/.git/objects/04/4dbcc818d31219514badf413f32ea0aa4c2fd4
+
+--- FILE_START: ./palproj/.git/objects/04/0d284533a88b383dec9cc88e2b3a7f0fa2d877
+--- CONTENT_START ---
+xe;!†­9…`Â€6VZO „ÌYØ°k±·wÜ˜hb9ßü¯PZØ£Õ»sñóÃ9Œ gÍ±õÊ7‚%¦ym"-C®¾¯o+6“¼ß.§‡427€€~ÍÔı’œ;€‚£(¾R|æTÅ¡h¾DRkT’¤T}vYêçÛ8ò¤…6«ş_ø9ò=µ--- FILE_END: ./palproj/.git/objects/04/0d284533a88b383dec9cc88e2b3a7f0fa2d877
+
+--- FILE_START: ./palproj/.git/objects/e2/d65c1e12a709d2ac7fc4f82ca06e952c39cd30
+--- CONTENT_START ---
+x+)JMU026`040031QĞKÏ,ÉLÏË/Je°óñïµRu÷˜víaß„gÛ&oo„ªrôŒwö÷qÑËMapõL}3÷å,Õ÷5ªıgKÿfØ¯9ækb 
+‰ó¥ƒøâ¿UVÆıÒ­ùódş©˜Š¨1)ùÉÙ©EºÉù¹ùÅ©z•¹9â–›çF¿QVÉ}¯ocÚ–•Í{ï´7Pµ¹©©BJinA|AQ~Vjr‰^qƒ„à²×ÚÏ'u7ßšTy¿LìÔïnˆµyé™yN7*"·ü{ì%]lµÛ)Uâ¤”ç[ •¬^«--- FILE_END: ./palproj/.git/objects/e2/d65c1e12a709d2ac7fc4f82ca06e952c39cd30
+
+--- FILE_START: ./palproj/.git/objects/a3/ac886a05ca1d7d2c051b4120a78e46009e3992
+--- CONTENT_START ---
+x+)JMU026`040031QĞKÏ,ÉLÏË/Je(¸ÆUöÕÔ H'éÙ·®M†vSÍ¡ª=ãııB\#BôrS\=SßÌ}9Kõ}jÿÙÒ¿ökùš BbAÃ9•¬û{˜â—¼²¿{ZÏáçåù,PcRò“³S‹t“ósò‹Sõ*ssRr­¦T‡Ögib®ìğ™™r{Ãm jsSS…”ÒÜ‚ø‚¢ü¬Ôä½â†ãw>™<ºÿák›L÷µÇW	ut†X›—™WÁàt£"rËï°Ç^ÒÅV»R%NJy¾ yÿ_--- FILE_END: ./palproj/.git/objects/a3/ac886a05ca1d7d2c051b4120a78e46009e3992
+
+--- FILE_START: ./palproj/.git/objects/b9/8ecc720617317e64ecb3172e0f8ee3cbb15419
+--- CONTENT_START ---
+x­YksÚHİÏüŠ^ù0‹åÌlfwË¶V™PÁà¼)W&¥j£(Ñ+ê6›òßs»%ğ#³UËL%¡·ïóÜÓÍ]”Ş±¿ıı¯oÿtÂx–Å<Lìl×jy³ âò+ã,Í»¤/=–‹o…ªÇ¾È4	ƒ]I‘ø­÷ü0+•æ»ƒí^®s®D%æÊ|m•RSiÖú©É¶Z¥Ü÷ÌP«ZY¡ÏNØeš³"	¡ÂH$<’4˜Ñ.áëáRjÄ“õj›¼uš®#á­±!¬Nl¸éñ‘H”·Â}ê¶\mDÌ«=ï‹˜'WBJ¾=¶ØI%âòk«uÂ>
+vFKQ!awÀîóÅ*ôS)Ëòt…ıGú²0Áœˆï„ï‡ÉZ²49ÅşÓ ÚA¬F­’·Jã>P;{«ı-ásx¡téõèßzôµ}~º*b‘(Oû,¯÷.Åƒšó§»æ<™E¡Rb¿c.VE.á9x3ç+L‘ŒE¹ì©”çñ4níˆ'lĞZã¹Py(¶<úÍiµò¦ÓE²)yæiBæ²-ÏC~QÊP‚Û˜kµø¬oò»ãy”Q×¥hÒ$×E.Ø.-rvJµÎÅâ·	ó¹âwÑ¥Ì£ı4À:Z¨^‹(ñü"Îº$Ş^iIŸÚØëLïİ«[oè,gáz7óqû3H¥½T¶s}}8?i¿(e9w¼«Ùp|98ËñlºĞÂ.y$ÙpzzÊŒ™s=fÄNë<™\ÑT«ÏBï+¦µ°F³ÙhâzØæ}po­n+Ë‘¥Àº7#ˆ»f‹¥3_³æJãÛÚœsö½yÊ£E±q†C¶|?^°Éxê²ËÙœi±£ñt„šX’*ÖÜÇàë£‘~ŸYäïª¾K;¼È…uŞbøû£t½¹-ò<Í;Gv±Pê³Lˆlßfä"iª9àadÃ~gáõ‹•
+Ó¤G¹Á rÅî9ReŒzÌ¨úuf@éœ‡H0­ #åìa¾ØŠ(Í(A{ÀŠ6ğ#Š…Ê`„'>€Wy²—¢sA=($¹Ÿ¥ˆM1B…ÿ)—Ìy>7£(FÌŸÂNœú"ê[k‡Ixú³ı+ĞˆËÕ;ŠB¿]:ËÜŠÿïÉXS>«È9ÁÔŞá=“1uÍØêAµ³ÉÄPF{SçÊ…šÖ7t…”òö8iµ®G{uá‡Ho0›NËM‹å#ÍŒ~}-"\ÌTÜŸ³K´v£»Jèi¢çæz2s†Şål2tç8¥múlë‰€ €t©1¿LØ«ĞŠ4´º‰$X¡ğ™}¬îL<„RÉªPFWÛŒvÇvM†cIÌ¿
+HGódÏ-G5ò•ù‰ÃIÂÄ4Ğz ´ªÙ”4P ¿¡ıó|gÖ#0'l:[ºç¬
+1g?mæ%úO$~‚Ù§±ˆÁ˜L£B;Œò×ôEµDe	ªåm¦2¾ÊS4Ä’YÈ³BbÂÆ9Ôë9Æ¡>ª8
+WÚıºâÚ>uLa¨…¢d»Õ\DJDHö°o¯ùğ¢Gç³¹3ªš0:­İ"Ã½Š=xD*dÆ5È9«Õjı‹0$O%:í3`±/¶IcÑ)P–¦õ^DQjrY³%ædÙŸá'´	4 8Ûgr“‘Ïî ŠÙ~Â®#¾›TçŒî'ûö¢@µ˜>ù°€M_ihåßy´¶T®üVé§òÉ`î§H³¹Èèhã:ÀÚw_/èâ(Ó
+À	(«QËHÑø#¿E<"‚´«Ø±„ƒUş]Æª ÒŠµp©ºÙÏV×à*	-ıX2ËÎwK*®
+i3kX5Ü½.¶ˆ%›}`mÆ¡!¤|×z4ˆ‡•Èsõ_TÅ\2±wËÿx¶Fr ¡eşqXË;¢ûØí±_ß¼¡¨ŞeÌ®.ĞŞ†:é@İL*š:{G…~®]ÿÏvÅBmR_ö?µGîßÛ×³Å²ı™zç;4õÁl>‡!»î¢:1ITG)³sm à•4G3^iNJxT.¯˜RKóÿØŸ4èk†²EÏf–K]œB3óš´@ì£â×äÁ-Nbòœ¨Ïl>£p&lâLGƒ÷ÎxªC1™Æ6wOÇÓ¥;š;äF¢C$…>ğˆ¯	|…z¦ªÉ?Ïà$Õ	f´Ók"¨f¶Â3ÅÔ?š‡K_É>/I›§¢`é¢8„Â‰@å¸ÔùïÉ÷—…?şü\€½ú¸e@sÓ‹©,5Ñ S‚Hvx$¥%U>Xœ¶ãÑª-$ÕØU˜)Èá¤mêÛ˜Qê¡äJuoÑ÷‚÷@PËİ´$ì§zÎmÜ¼:Zh¢úŠq8†ƒdEYPDÌãTj3äB×Y&×_Sÿó…Í®ótK]"V†¥Õ*İI&å±iúD÷K‡¡i£Eµe	“Ôİx²£¦B¢üÊFPÆ^CéÃËc­óQp¶|®7×ÿ _óªZñÒ»/È0¸£v˜lÓ¯¢S9lïËÆ–ÒQfÏ±$º¥hFp”Tt™3–ãè¶D‰1ÁtåW©ÁŒµŠæÊáN‡¯×U[½ç	øêÌ è¿²ÕazÎ@¼–õŒ?HVÛÈV60S_¨‰_ w5“ gFf
+ÜU^Öò@«J*ûÃ°šÀÔ‹!ªşMØ×`ÿÑY0g2wáíA¸¸e·³›İÆ†¶îM©ø#a(V‘,Ä‡Û {ÊöPw…6ñ¥¶¾@éœ@À¤²iPî1ìIxË,%´Ÿ‚0ÑÎ8Ş˜ ‚’¬d‚ÚWo©›RÅëUıjÎñÉÿ¹V‡é)ºÅ3ÜÛí?¬†DÕãıÂ< 5ÏV“ä½(ĞjódDPsôEÎÊrÜéà7TT Ş
+:O&ĞÇ,Ö4Óè¨™=nÙôÇÛN·ËşÂ,ÏÂŸkj	4JLE\]¾àê×¤ş½ãƒöi¬¥J¾JRY=¤5é/Ò§Ñ\i =/A18I/q¯„Yj'§3IæŞ´UWX
+ ®U ½É‘õ"*£ûíB§ÿhw©e{¿Ófú©Øt~go#­9¨ö²5]BÖş~‚Çö¾[”W(H"ñ ’5Xû·F­måî!4Ğyu€èË	[è{n%¬Ìì#rõÂ‹TŸ—Û8âèS´í(HK|ÓDB2úiÿ~â²ch$™¯jjYpÉ ×â |)Ïjøí5¨Ğá«‰Å]¶„‡ìQş-'ÏP}bÂı2g'#ès¬CCAë »š
+ÉB“hhg5ÿkê4¥§y¸Õ È–ÔìI¼ôTëÊ„ó`>òv¿šˆò/–[ø‚Q¥÷=«yåLïzp={W9ûé­¥¾­Ômëj¼XĞ»ÌRğ¬‡§„mm8^nw¨˜_¡İ¡Ë‚Z^lˆtbŞ#ô+ÈÙÖü<P¾óRSi¼œÔN/=ñÌoÇxZ‰§éq¥øjC/vıe^<eİQVLSu™‰oî2Ç§í/¸ÇÉD·œ€6–ıç­Şúƒ‚~%š-!PY“¨İ§dEY=}ë¶éyôSç•í“ğ"/’ÎOàıö[ÿ¼¦_†ú¸ğ¾éá»bİ×ïÎİÖ:ÏÃ--- FILE_END: ./palproj/.git/objects/b9/8ecc720617317e64ecb3172e0f8ee3cbb15419
+
+--- FILE_START: ./palproj/.git/objects/a9/e4ef807eee6bec0a5574404e95c2cabf784dfe
+--- CONTENT_START ---
+xu‘AOÃ0…9÷WXåJJÃ®c „`Ó¦	â¶Şf­±C’
+Æ¯'é`BC¨‡Ôñ{/_œª•
+ƒË£cXx¾%ÓmXC¥ã½BXŠotÛb\é³ëÙäl¯^g¥JFU‰lŞÅ™,;†9k„XoˆWĞÃ:ˆÛ±§ûf-41ºìq2»»ºÁ©¶6ÙGb·½Äá[­9xXR‘8È{4™>Ãoe>)è–}ˆà?—jĞ"7È5¡Ïf‹°dQ¯QŠEÕº^£Š¸ ÜŸÌ4@–°•ÎAän©Öâäj‰÷û³Øq?¬Äù¦Yqarİj¿IQğN‘ÙuÂÙøi:™aP–åî|c47§)aïÛ#t>ı¦cªÅq6º¿‚—|õ]æ'+U7é¯,úo˜òcZJR÷ì<mæ&>Ó0‚å¯Ù¢mº¼--- FILE_END: ./palproj/.git/objects/a9/e4ef807eee6bec0a5574404e95c2cabf784dfe
+
+--- FILE_START: ./palproj/.git/objects/45/4965ec9de99a25ef7c258fcd75fd683facc64d
+--- CONTENT_START ---
+xXÛnÉÍ3¿¢ kR F¾h½)”li#YŠ©µ,¡9Ó$ÛN»{Dq‚ ßàÇ|İ~INU÷‡–	b5œî®Ë©S§zVÚığò?üá—éíÉ‡[š\¿¿=ûëíßƒsíôOŞ®4ÙjaMµ ÜVA?R3ÛZm¨vö³Îñ *ÈëĞÔÇƒÁşşMzúÎªòxŸ¦:^ŞÔx‘./¯hx©ÜBÓ¥ªÂ‡+[èr„sHÑ’O\©|i*Msë¨ÖÎÛJ•Ôx-'úA—¶^é*druAÍLiÂ†¦Á© œ;Ø'¶Å¬”ÛPkË­%]ùÆi‚#Nã(­°­ÓÊ,°ÔÀ†`©ÒëÖŸÉFW:,maK+{ÓÙƒv› ´6eI3¶¹‚/=…ƒß™pŞÌà=Ç¦Ğui7ø®ñ¼bÿÔæ÷ÚI@üt~_\áàLƒ
+Lçàf¹I+±‹RÓÉÍİëˆ©<×>™ú¶	ìàM©*ÿ•Ú¢RyÓz­PTÚ\•c‰øÁa($9+NFt:OÈèÂaŞî\=hòœ7oJ˜–ÛU]ê€åŠaçøVr]ŞØÉ¨³İ/õÇ^é·¥ò÷¤êº4yŒ½Â8ØlmÂR 2Y"FÓmæé¬z0ÎVŒ‚6ÙÉ\¶ò“u÷j†TE?Ïš*4ôÑ¸Ğ HW	]ÃW#rMUµoR©ê`ëèü7a<É¿4Æñ›	í¦‘Ş‚í‡Í^¯Ğ!©B|[%âÁE5wÊ×ä’£ïèT Ñ÷âœ`÷hsø)a,,5¶‹^ZÒ!(%Æ æt)†°ˆ®|Ò3d_s`xGñ(‡ëHÙ:~É¡âí{.ÄÅS7µÅ«/‘ §…Ii›b^* «´İÅ§·iXYª›2K7¤Š‚Ô‹~¬-®0Í]}{ş(¡´#Ub~H~S@PÅ¨gBhK$•ÛÄ|•JŞ¶8ó)‰ı }D2('Xå¬0×Ï¬ò+¯E9Æ’oJ>G¤¢çôÉˆìÁ'cXÓZ9‰ø[›·u½¿ÿgïeûÍ‰ÓŠ½z¯$¦ä/dÃ™FuqÎíÜä†‘²èñËPÁ™;¼(«mY ~~ãƒ^y*Í½¦“)‚	n¾FŠ%0Şà%	§PÍÅ‹ó«¬ñ`^Ğ1%œlªˆVD†³‡’|0TÙ@•ªì` ²Êï©fª¼Ê;Àa>°lõôİ.µq”’ÂĞöèï G–-ĞéCT®yÜŒƒ´„³!9<¦“^¡u©íê—±÷Ey,t6ø`K}ŒóQ-Eolãútƒ3Ñjô7S‹A´7­­+J[´2ºà, RèäÁ× ùÜ”ÚÓğüöêrL“étL?MG[|sq*n•Èª4úŠ´>nÆŒ¨µrã¬ØTj…İPNxëK£=¢DˆåOè2¼åSô0†ŒÍ5³=Ó»£Dè3 ÂöÄLßÔ(­–=2vNCşß,šÔ¹–vLfKa”Ø3–0ğ“~ Æ4^’™£“jĞ#À?ÙÖ Z:(
+a€çt¸e{şF»@7ps•kü}ÁYÅ“BÂezi&ÿœÄjØÖ?ÍS¦ü*JÇJbp‘`¯€º>VĞ-qà6ùKdŞI” H@8æ’å–Ì1w¨¢º	cü‚?Œ‚İŞ&”Âş¢—ÀP¯Ç›
+]O7#ìˆXX·"±{¥H¦“ğ`,œÆX5•t¤x—Æºzøô/—T(È%päRBë6[ç¸3´*ÛhWóOÓwõ.òÊ;>Ç:tçDôòz}ãÑUÖŒÎCã›²€Ñ!N^6RL:pšAé¤«BW ?”Ë]ƒ9×gá1 [|ê·iXÂ+ßf»O@‰rY€Šº@pı&·õâõÁÌTŒcºA…Ûõá5Ÿ|“y–NbddõFxÁ›•AÿNJ“HËbMÉBØÛ)RÃ«½D¦DıdhçÜ2 wz;îÀ}Šœ# Ï"KnÛƒ…ÁŒ•Î°ØëáeÁ_G¨jCVŒ©©QÒíR—‚Pš‡ìps»©XV“ÂQŒØçìOM!V@«À@Pì–RÕ÷XµÜx(>ly(´1erØR\Ô©ØÈçÎÔ€NéÈÂŞB=¢5‚ºlÙ …œÅ¼#R_ou(= FjÆ} ÜQˆÆ‡F7ô:Û¬ ^gtíò%(,Q«AòJú¦×è'h.J´Õq]‹cĞOÚ‰ƒ‰Š¢´~æTéL„*ç Bv$)µ*QÜŸS“v)¤Ğ9‹»„Ö1ï‚†.ğ f/üJqA™<HK•è§÷;NvGZ$\<,üœäY€ÛmPTbãt/6ğ?Ze×o£F‚£r€}ø\Ag"‰`1dUˆ˜gÊúd[6xd’>˜´«YÎ$:vâ¥mÇ©•Š… =7òÎÍQ½¯3(Q«ÄR\¡¦ µ†:[d˜ÇB¨ç<İ*|ùòåH¨<zÚZ lKd3jé¸CS Ş7œ-ø.Úæ9»’r^Û±áè–@XOµîôIL¼OAfçÍ·«8ü1ÿÅs
+7)ÿ¥¼+fÇß½yı?¸t•¸¡øPî 7*n™}Î08Îò‰L«Çt]	Ø¶(;³ %4?¾¤!Ãíèè4ÇóÛÛˆ8ñDĞ-pPêG&°tU-º4pùFìN ™t0bQƒ5|ÏP,©[BëÄÖ&9š °·c5İY –½/ÄŞ(i·¦_6íØÙn.®—&_ö1?û¨Á­ŒcNÃLÊºdQïiÉ÷ ı/K²^NÇT§y‚è4¬H£éà¨¢˜/EçÀÄ8lJ\NOí”uT@é¢öĞÿÆ¾'TÛÌ ÎBæq€IÒ¡ƒİéZA‘á9FÍ$_³Á÷¥Q‚§‹pIÅ×#¬CGïEôz÷"%]¡ˆVMµUÓuYª•âĞ):o20¿e+—+)tr?°¶D–F…øc²‚ÜbjÅw!m½whJˆ´Ò¯C\¬%EÔÊ¶Ø¨ÚÁt9W®Äönão(HŞ¸+ËÕ]â©ãW¯ŞImDGL'A+ë\*‹r©¹­ˆÍâv¯uº	kİ‰­9;¸Šc‰á×p‰Û(ÄPºJÄµ^º1aóÁ‚ÿ8l›×ğìQñı')=;üöõß¿}ı'~XÁóŸÿ"¢íÃDÀóîßı‰õi2òit¥é=Ùì‰ğŒûíµÊ³¯`Ÿ,nµdgC»XŞ™€º[ü5ù6Œ0‰oqÓF§ÃÌi<ğÇ8%éŠÅmH¤~¶Aiwë•Ußš½-YnõRo·lÊ]T<øûod*àËòËˆòøf*–raLwwõ&Ç•œ¾»õ6~ªŸºı÷pmç
+†æ„{8®°rjé­bÁ­‡'wé‚;[İfòa$à\@°H¦Á@ÄÜk3= Byx_šÅ(~QşÜ9­QåpB¹×ñÔISAóèÄ³–˜‡øÎœ»æq4|ç—&2&i¨$¹äÖDv=ø;ëÁI`9ƒ™(F¸<ÃÍÎ`ğËÙûÓíıı †ûm´--- FILE_END: ./palproj/.git/objects/45/4965ec9de99a25ef7c258fcd75fd683facc64d
+
+--- FILE_START: ./palproj/.git/objects/45/3cf5794d95590e2ee5f1250f276144f945235b
+--- CONTENT_START ---
+xKÊÉOR°´`pËI,Î¶µ5Ò3Ö3æJ/ÍËLÎ/ÊòõŒô¸
+Š+“óÒt“2ó‹*Aê,õ,¹Àštƒ}s’3RsâÆz†z†PqßÌô¢Ä’T[[==S. ².·--- FILE_END: ./palproj/.git/objects/45/3cf5794d95590e2ee5f1250f276144f945235b
+
+--- FILE_START: ./palproj/.git/objects/9c/8780254b0a0fd05918769488a8caf00d61c027
+--- CONTENT_START ---
+xKNÄ0DYç½gˆl'ñGBˆ'@bÚv{Æ0şÈqæö„á,Ÿê•ª\I)v˜Ä|×¥Zë•˜…ŸlnffÒŞf<»,LRj¨Ø(wĞVJá•	Òê…)âÆ¢å\¢Èå"‡F.nıT¼`Š”áõŠıÛn]I#nOÀÕl´¹pÏcÃì;ı¯=¼Uà{<æÒÂşãaıÂ
+!i=Àöçøâ>©=ìƒµ¬4^Óù&”/ÀìÁo©¾×V>Èõq=A/@ßî¼y‚_iø^³jÚ--- FILE_END: ./palproj/.git/objects/9c/8780254b0a0fd05918769488a8caf00d61c027
+
+--- FILE_START: ./palproj/.git/objects/9c/a41ce27a7c30098db028b7f29e7a56bea496b6
+--- CONTENT_START ---
+x+)JMU07`040031Q0²4HM²0L4K5³ˆÏÌË,ÉLÌ‰OÎH,‰ÏÈ,.É/ªŒ/ILÊIÕ+¨d¸«]÷çwk×ÏŞlv5½»{s_ ëŒ·--- FILE_END: ./palproj/.git/objects/9c/a41ce27a7c30098db028b7f29e7a56bea496b6
+
+--- FILE_START: ./palproj/.git/objects/e3/8a6bd69b8e2d34e76ea5003ca3c80bd99c1411
+--- CONTENT_START ---
+x+)JMU0³d01 …Œ’Üç?ík¶.ıò5Ê}ú•Ù×îweüŞeh``fb¢—™W¡—œŸ—ÆpI1}ı’ÈÍ?_jŞQÉ›ÛxP ·ù ş--- FILE_END: ./palproj/.git/objects/e3/8a6bd69b8e2d34e76ea5003ca3c80bd99c1411
+
+--- FILE_START: ./palproj/.git/objects/d2/110167bc3fa459b3f971e929dc246e9d81c12f
+--- CONTENT_START ---
+x•SK‹Û0îÙ¿b †œ¼vCZ¶zê²´—ÚËŞ„"kYc¤q”ü÷jì4ñJu0b4ßK#ïíàÓjõè9ÂïÒ:RØcP†¼GÃ–|„÷Õj½É.YÖ2÷×6ëjDZíğÏ=ÆÍHRc£ÇJJ ºï5ZÈJ2Œ\D¨»M66Gôucİ_. ?‘ì{íì'zàã‡&0\½ˆg#£‡ÇjÂJ)¢ô(¯;GF»–"o`_´‡Â™† 5uÚzpšm¤­>`r“=¡
+DåC[°ô¿¬?•-wNø§´ğ]ª9%5 ‰â¨+¹Ç Âd}§éû øûöšLšÄ­  œ%”g5çC° Ÿ>¯«µØø)yßÈßTÓì.k[§¶äê”¸¡ /NÇ½	
+8âÒ9Ğiğ‡t#À­Mänfø»»„™;\Œ} ÓYõ:F÷òT–¨ÔüôXUU)^—·Ú6I¦yp‹ğL&½¾qtÖ ÈìfÊÂ?ÑGdÕ¢–_ÓT!gû¯Ö×âjW|ÛB°#F¥ë:Ü_Ì<ÀLáµx¡pÔ¡ÆZvOVTºÁéHvÿEµÄy4-v8G^Æ—ôÇıëƒV--- FILE_END: ./palproj/.git/objects/d2/110167bc3fa459b3f971e929dc246e9d81c12f
+
+--- FILE_START: ./palproj/.git/objects/fd/20e4b83f8f0ba27ea8766e1bcfd77cb75e3ab0
+--- CONTENT_START ---
+x+)JMU01d040031QpôŒwö÷qÑËMapõL}3÷å,Õ÷5ªıgKÿfØ¯9æ zcz--- FILE_END: ./palproj/.git/objects/fd/20e4b83f8f0ba27ea8766e1bcfd77cb75e3ab0
+
+--- FILE_START: ./palproj/.git/objects/1f/1a817cd6e0907966e09d96cb4a68ff85225a62
+--- CONTENT_START ---
+x+)JMU026`040031QĞKÏ,ÉLÏË/Je(¸ÆUöÕÔ H'éÙ·®M†vSÍ¡ª=ãııB\#BôrS\=SßÌ}9Kõ}jÿÙÒ¿ökùš BbAÃ9•¬û{˜â—¼²¿{ZÏáçåù,PcRò“³S‹t“ósò‹Sõ*ssRr­¦T‡Ögib®ìğ™™r{Ãm jsSS…”ÒÜ‚ø‚¢ü¬Ôä½â†ãw>™<ºÿák›L÷µÇW	ut†X›—™WÁ0Ï±N@ãùÒÇÜ7ö~]${õàã t~`@--- FILE_END: ./palproj/.git/objects/1f/1a817cd6e0907966e09d96cb4a68ff85225a62
+
+--- FILE_START: ./palproj/.git/objects/f7/52467e3bab0d21486ef9513f0fde46103e1db0
+--- CONTENT_START ---
+xA
+Ã  {ö{/µÆ(”Ò@/½ö]©Ò´¿¯ô	=Ã0¡•’”·Şˆ`ŒZúèPŸ()ëŒY‘\&ƒ³‘(pçgÛà†%S…Ç+œã®[‡ğB+îP“ñÎj§•”RtÑŸLÿÕbrÍœq…ù¡U¦7CÊ+‰/7@--- FILE_END: ./palproj/.git/objects/f7/52467e3bab0d21486ef9513f0fde46103e1db0
+
+--- FILE_START: ./palproj/.git/objects/92/97f3be37d9a97a1e95870f4e2fbda0e534a949
+--- CONTENT_START ---
+x…“ÁÚ0†{ÎSŒà°­T Rµõ±Ù]ÔPVTí)2É$±pìÈvèòöÛĞ¢¶Rs°ÂÄóÍ?ó©ğù~şî„Æ
+­Ü}šÎï’Ä¢9‰-K T#Ô›o]"’;´Æ°·®EĞu-JÁ%|õğ Ë#š˜²{m\ zÔFó”ÍÓ‘ÿ1¬y­&¦¿	óœ†R+Ç…"Ğ%P'-‡.Êó¹˜Î‚ÌxN)©f3tåßQ£IñZÊ”ƒuºóUjÑô-­ud³Áš™m¹Á-D‰Ÿ[šuÜ‰wëj!Ñ¢B÷C›ãMë¼ï‹K” cxÀšZ~•sıVkšŸrh&¿ÇPê®³		Â 8BVŒf@!¢íPJ{ÿRw½öi×‚SÁG¨uî‹NyÁT-D"ªK§Í9TùÓ¾û4M™?FT3{U%·G¯,ºò±áüvø­*û>ú¶.D›¼BOü¥&Ğ¤8!ÙVÑÑrÕ …÷ƒÅzP†ğPáéÃÿÇn :	£U‡Ê±Ğïzš…]n0‹—ñıxÚlò¬ hñ%{e0:Ó.ÖÄ‚÷¢ »E‹ıh¶ÙK¾Xfğ}µ{†×Í~‹ån¿ÈR!_ì²íGØlaÿ-ƒ))ÇU%ÉíÒP÷×u‰ÿÃÊP÷†ÁÁˆªÁä' ?.ô--- FILE_END: ./palproj/.git/objects/92/97f3be37d9a97a1e95870f4e2fbda0e534a949
+
+--- FILE_START: ./palproj/.git/objects/d8/849562a712e64529a674ad2cc0dfb32dcd98ac
+--- CONTENT_START ---
+xKÊÉOR05fpËI,Î¶µ5Ò3Ö3æJ/ÍËLÎ/ÊòõŒô¸
+Š+“óÒt“2ó‹*Aê,õ,¹ 4Ï--- FILE_END: ./palproj/.git/objects/d8/849562a712e64529a674ad2cc0dfb32dcd98ac
+
+--- FILE_START: ./palproj/.git/logs/refs/remotes/origin/main
+--- CONTENT_START ---
+0000000000000000000000000000000000000000 f752467e3bab0d21486ef9513f0fde46103e1db0 Damien Ryan <damien@ryancs.com.au> 1749863477 +1000	update by push
+f752467e3bab0d21486ef9513f0fde46103e1db0 0de7a4e2a4c1d7134f424529d5ef68462813c668 Damien Ryan <damien@ryancs.com.au> 1749863957 +1000	update by push
+0de7a4e2a4c1d7134f424529d5ef68462813c668 aec3d2bea7c047173747968b35062c88c97e4e6a Damien Ryan <damien@ryancs.com.au> 1749866491 +1000	update by push
+aec3d2bea7c047173747968b35062c88c97e4e6a 08b443dabab00e141509635d0952c45b64759f36 Damien Ryan <damien@ryancs.com.au> 1749866605 +1000	update by push
+08b443dabab00e141509635d0952c45b64759f36 b3d530b171ee7c13694096f1121159108e7b9899 Damien Ryan <damien@ryancs.com.au> 1749867690 +1000	update by push
+b3d530b171ee7c13694096f1121159108e7b9899 e4ed0284ff1557f6cc674ba6d9032ccc545296a8 Damien Ryan <damien@ryancs.com.au> 1749869865 +1000	update by push
+e4ed0284ff1557f6cc674ba6d9032ccc545296a8 66363822a21cf9eb186a9413aaba146cacd5f8d9 Damien Ryan <damien@ryancs.com.au> 1749870234 +1000	update by push
+66363822a21cf9eb186a9413aaba146cacd5f8d9 a560991724490139ce16ca214cc1416b1b925e1f Damien Ryan <damien@ryancs.com.au> 1749871050 +1000	update by push
+a560991724490139ce16ca214cc1416b1b925e1f c33efda9537afa7638fdf5ee59571b9138ee5a8a Damien Ryan <damien@ryancs.com.au> 1749873001 +1000	update by push
+c33efda9537afa7638fdf5ee59571b9138ee5a8a f3137b977db4b73d6753683e466912831426d9fb Damien Ryan <damien@ryancs.com.au> 1749873139 +1000	update by push
+f3137b977db4b73d6753683e466912831426d9fb 8b662d79f6b8507e19bab116a72a16560a9ca965 Damien Ryan <damien@ryancs.com.au> 1749883421 +1000	update by push
+8b662d79f6b8507e19bab116a72a16560a9ca965 9c8780254b0a0fd05918769488a8caf00d61c027 Damien Ryan <damien@ryancs.com.au> 1749884173 +1000	update by push
+9c8780254b0a0fd05918769488a8caf00d61c027 044dbcc818d31219514badf413f32ea0aa4c2fd4 Damien Ryan <damien@ryancs.com.au> 1749884506 +1000	update by push
+044dbcc818d31219514badf413f32ea0aa4c2fd4 c81115c4457927364b82a577173f2e2469fc829f Damien Ryan <damien@ryancs.com.au> 1749885770 +1000	update by push
+c81115c4457927364b82a577173f2e2469fc829f 3ebacd568128e6613b9cd4e294e3255b51f0a169 Damien Ryan <damien@ryancs.com.au> 1750160383 +1000	update by push
+3ebacd568128e6613b9cd4e294e3255b51f0a169 0c53a7ef6e5043333cd536663d0a29dfc4e60747 Damien Ryan <damien@ryancs.com.au> 1750160466 +1000	update by push
+--- FILE_END: ./palproj/.git/logs/refs/remotes/origin/main
+
+--- FILE_START: ./palproj/.git/logs/refs/heads/main
+--- CONTENT_START ---
+0000000000000000000000000000000000000000 f752467e3bab0d21486ef9513f0fde46103e1db0 Damien Ryan <damien@ryancs.com.au> 1749862818 +1000	commit (initial): Add initial AI context file
+f752467e3bab0d21486ef9513f0fde46103e1db0 f752467e3bab0d21486ef9513f0fde46103e1db0 Damien Ryan <damien@ryancs.com.au> 1749862885 +1000	Branch: renamed refs/heads/master to refs/heads/main
+f752467e3bab0d21486ef9513f0fde46103e1db0 0de7a4e2a4c1d7134f424529d5ef68462813c668 Damien Ryan <damien@ryancs.com.au> 1749863878 +1000	commit: add vi note
+0de7a4e2a4c1d7134f424529d5ef68462813c668 aec3d2bea7c047173747968b35062c88c97e4e6a Damien Ryan <damien@ryancs.com.au> 1749865387 +1000	commit: add stack
+aec3d2bea7c047173747968b35062c88c97e4e6a 08b443dabab00e141509635d0952c45b64759f36 Damien Ryan <damien@ryancs.com.au> 1749866528 +1000	commit: nginx
+08b443dabab00e141509635d0952c45b64759f36 b3d530b171ee7c13694096f1121159108e7b9899 Damien Ryan <damien@ryancs.com.au> 1749867684 +1000	commit: Add initial docker file and services
+b3d530b171ee7c13694096f1121159108e7b9899 e4ed0284ff1557f6cc674ba6d9032ccc545296a8 Damien Ryan <damien@ryancs.com.au> 1749869864 +1000	commit: Integrate Nginx and Flask proxy; add .gitignore
+e4ed0284ff1557f6cc674ba6d9032ccc545296a8 66363822a21cf9eb186a9413aaba146cacd5f8d9 Damien Ryan <damien@ryancs.com.au> 1749870233 +1000	commit: Fix Nginx proxy_pass service name and header typo
+66363822a21cf9eb186a9413aaba146cacd5f8d9 a560991724490139ce16ca214cc1416b1b925e1f Damien Ryan <damien@ryancs.com.au> 1749871045 +1000	commit: fix nginx
+a560991724490139ce16ca214cc1416b1b925e1f c33efda9537afa7638fdf5ee59571b9138ee5a8a Damien Ryan <damien@ryancs.com.au> 1749873000 +1000	commit: Add psycopg2-binary to Flask requirements for PostgreSQL
+c33efda9537afa7638fdf5ee59571b9138ee5a8a f3137b977db4b73d6753683e466912831426d9fb Damien Ryan <damien@ryancs.com.au> 1749873138 +1000	commit: Update Flask app to connect to PostgreSQL and add DB test route
+f3137b977db4b73d6753683e466912831426d9fb 8b662d79f6b8507e19bab116a72a16560a9ca965 Damien Ryan <damien@ryancs.com.au> 1749883420 +1000	commit: Increase Gunicorn timeout in Dockerfile
+8b662d79f6b8507e19bab116a72a16560a9ca965 9c8780254b0a0fd05918769488a8caf00d61c027 Damien Ryan <damien@ryancs.com.au> 1749884172 +1000	commit: Update gitignore for vi swap files, update docker-compose.yml for .env, and dump_project.sh to exclude .env
+9c8780254b0a0fd05918769488a8caf00d61c027 044dbcc818d31219514badf413f32ea0aa4c2fd4 Damien Ryan <damien@ryancs.com.au> 1749884502 +1000	commit: Add flask-SQLALchemy
+044dbcc818d31219514badf413f32ea0aa4c2fd4 c81115c4457927364b82a577173f2e2469fc829f Damien Ryan <damien@ryancs.com.au> 1749885765 +1000	commit: correct flask
+c81115c4457927364b82a577173f2e2469fc829f 3ebacd568128e6613b9cd4e294e3255b51f0a169 Damien Ryan <damien@ryancs.com.au> 1749983340 +1000	commit: about to tackle llm
+3ebacd568128e6613b9cd4e294e3255b51f0a169 0c53a7ef6e5043333cd536663d0a29dfc4e60747 Damien Ryan <damien@ryancs.com.au> 1750160448 +1000	commit: ingestion done
+0c53a7ef6e5043333cd536663d0a29dfc4e60747 f8010205845f71f46bb69a130de008898795c799 Damien Ryan <damien@ryancs.com.au> 1750332120 +1000	commit: Clean up debugging artifacts and revert Flask to Gunicorn, adjust routes.
+f8010205845f71f46bb69a130de008898795c799 dc5a2d69a307d9500c6c3f6e04cd7fd7238988d4 Damien Ryan <damien@ryancs.com.au> 1750334303 +1000	commit: Add app/uploads/ to .gitignore and untrack existing uploaded files.
+--- FILE_END: ./palproj/.git/logs/refs/heads/main
+
+--- FILE_START: ./palproj/.git/logs/HEAD
+--- CONTENT_START ---
+0000000000000000000000000000000000000000 f752467e3bab0d21486ef9513f0fde46103e1db0 Damien Ryan <damien@ryancs.com.au> 1749862818 +1000	commit (initial): Add initial AI context file
+f752467e3bab0d21486ef9513f0fde46103e1db0 0000000000000000000000000000000000000000 Damien Ryan <damien@ryancs.com.au> 1749862885 +1000	Branch: renamed refs/heads/master to refs/heads/main
+0000000000000000000000000000000000000000 f752467e3bab0d21486ef9513f0fde46103e1db0 Damien Ryan <damien@ryancs.com.au> 1749862885 +1000	Branch: renamed refs/heads/master to refs/heads/main
+f752467e3bab0d21486ef9513f0fde46103e1db0 0de7a4e2a4c1d7134f424529d5ef68462813c668 Damien Ryan <damien@ryancs.com.au> 1749863878 +1000	commit: add vi note
+0de7a4e2a4c1d7134f424529d5ef68462813c668 aec3d2bea7c047173747968b35062c88c97e4e6a Damien Ryan <damien@ryancs.com.au> 1749865387 +1000	commit: add stack
+aec3d2bea7c047173747968b35062c88c97e4e6a 08b443dabab00e141509635d0952c45b64759f36 Damien Ryan <damien@ryancs.com.au> 1749866528 +1000	commit: nginx
+08b443dabab00e141509635d0952c45b64759f36 b3d530b171ee7c13694096f1121159108e7b9899 Damien Ryan <damien@ryancs.com.au> 1749867684 +1000	commit: Add initial docker file and services
+b3d530b171ee7c13694096f1121159108e7b9899 e4ed0284ff1557f6cc674ba6d9032ccc545296a8 Damien Ryan <damien@ryancs.com.au> 1749869864 +1000	commit: Integrate Nginx and Flask proxy; add .gitignore
+e4ed0284ff1557f6cc674ba6d9032ccc545296a8 66363822a21cf9eb186a9413aaba146cacd5f8d9 Damien Ryan <damien@ryancs.com.au> 1749870233 +1000	commit: Fix Nginx proxy_pass service name and header typo
+66363822a21cf9eb186a9413aaba146cacd5f8d9 a560991724490139ce16ca214cc1416b1b925e1f Damien Ryan <damien@ryancs.com.au> 1749871045 +1000	commit: fix nginx
+a560991724490139ce16ca214cc1416b1b925e1f c33efda9537afa7638fdf5ee59571b9138ee5a8a Damien Ryan <damien@ryancs.com.au> 1749873000 +1000	commit: Add psycopg2-binary to Flask requirements for PostgreSQL
+c33efda9537afa7638fdf5ee59571b9138ee5a8a f3137b977db4b73d6753683e466912831426d9fb Damien Ryan <damien@ryancs.com.au> 1749873138 +1000	commit: Update Flask app to connect to PostgreSQL and add DB test route
+f3137b977db4b73d6753683e466912831426d9fb 8b662d79f6b8507e19bab116a72a16560a9ca965 Damien Ryan <damien@ryancs.com.au> 1749883420 +1000	commit: Increase Gunicorn timeout in Dockerfile
+8b662d79f6b8507e19bab116a72a16560a9ca965 9c8780254b0a0fd05918769488a8caf00d61c027 Damien Ryan <damien@ryancs.com.au> 1749884172 +1000	commit: Update gitignore for vi swap files, update docker-compose.yml for .env, and dump_project.sh to exclude .env
+9c8780254b0a0fd05918769488a8caf00d61c027 044dbcc818d31219514badf413f32ea0aa4c2fd4 Damien Ryan <damien@ryancs.com.au> 1749884502 +1000	commit: Add flask-SQLALchemy
+044dbcc818d31219514badf413f32ea0aa4c2fd4 c81115c4457927364b82a577173f2e2469fc829f Damien Ryan <damien@ryancs.com.au> 1749885765 +1000	commit: correct flask
+c81115c4457927364b82a577173f2e2469fc829f 3ebacd568128e6613b9cd4e294e3255b51f0a169 Damien Ryan <damien@ryancs.com.au> 1749983340 +1000	commit: about to tackle llm
+3ebacd568128e6613b9cd4e294e3255b51f0a169 0c53a7ef6e5043333cd536663d0a29dfc4e60747 Damien Ryan <damien@ryancs.com.au> 1750160448 +1000	commit: ingestion done
+0c53a7ef6e5043333cd536663d0a29dfc4e60747 f8010205845f71f46bb69a130de008898795c799 Damien Ryan <damien@ryancs.com.au> 1750332120 +1000	commit: Clean up debugging artifacts and revert Flask to Gunicorn, adjust routes.
+f8010205845f71f46bb69a130de008898795c799 dc5a2d69a307d9500c6c3f6e04cd7fd7238988d4 Damien Ryan <damien@ryancs.com.au> 1750334303 +1000	commit: Add app/uploads/ to .gitignore and untrack existing uploaded files.
+--- FILE_END: ./palproj/.git/logs/HEAD
+
+--- FILE_START: ./palproj/.git/info/exclude
+--- CONTENT_START ---
+# git ls-files --others --exclude-from=.git/info/exclude
+# Lines that start with '#' are comments.
+# For a project mostly in C, the following would be a good set of
+# exclude patterns (uncomment them if you want to use them):
+# *.[oa]
+# *~
+--- FILE_END: ./palproj/.git/info/exclude
+
+--- FILE_START: ./palproj/.git/config
+--- CONTENT_START ---
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = false
+	logallrefupdates = true
+[remote "origin"]
+	url = https://github.com/damienpryan/Palantir.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "main"]
+	remote = origin
+	merge = refs/heads/main
+--- FILE_END: ./palproj/.git/config
+
+--- FILE_START: ./palproj/.git/FETCH_HEAD
+--- CONTENT_START ---
+f752467e3bab0d21486ef9513f0fde46103e1db0		branch 'main' of https://github.com/damienpryan/Palantir
+--- FILE_END: ./palproj/.git/FETCH_HEAD
+
+--- FILE_START: ./palproj/.git/COMMIT_EDITMSG
+--- CONTENT_START ---
+Add app/uploads/ to .gitignore and untrack existing uploaded files.
+--- FILE_END: ./palproj/.git/COMMIT_EDITMSG
+
+--- FILE_START: ./palproj/palproj_combined_live.log
+--- CONTENT_START ---
+2025-06-21T04:30:36.724247925Z /docker-entrypoint.sh: /docker-entrypoint.d/ is not empty, will attempt to perform configuration
+2025-06-21T04:30:36.724287127Z /docker-entrypoint.sh: Looking for shell scripts in /docker-entrypoint.d/
+2025-06-21T04:30:36.732550734Z /docker-entrypoint.sh: Launching /docker-entrypoint.d/10-listen-on-ipv6-by-default.sh
+2025-06-21T04:30:36.757855051Z 10-listen-on-ipv6-by-default.sh: info: Getting the checksum of /etc/nginx/conf.d/default.conf
+2025-06-21T04:30:36.777536885Z 10-listen-on-ipv6-by-default.sh: info: Enabled listen on IPv6 in /etc/nginx/conf.d/default.conf
+2025-06-21T04:30:36.778956007Z /docker-entrypoint.sh: Sourcing /docker-entrypoint.d/15-local-resolvers.envsh
+2025-06-21T04:30:36.779225650Z /docker-entrypoint.sh: Launching /docker-entrypoint.d/20-envsubst-on-templates.sh
+2025-06-21T04:30:36.786803132Z /docker-entrypoint.sh: Launching /docker-entrypoint.d/30-tune-worker-processes.sh
+2025-06-21T04:30:36.787085392Z /docker-entrypoint.sh: Configuration complete; ready for start up
+2025-06-21T04:30:34.983849699Z 
+2025-06-21T04:30:34.983954905Z PostgreSQL Database directory appears to contain a database; Skipping initialization
+2025-06-21T04:30:34.983961129Z 
+2025-06-21T04:30:35.170484823Z 2025-06-21 04:30:35.170 UTC [1] LOG:  starting PostgreSQL 16.8 (Debian 16.8-1.pgdg120+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14) 12.2.0, 64-bit
+2025-06-21T04:30:35.363685314Z 2025-06-21 04:30:35.363 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2025-06-21T04:30:35.363705401Z 2025-06-21 04:30:35.363 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2025-06-21T04:30:35.371495153Z 2025-06-21 04:30:35.367 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2025-06-21T04:30:35.379853303Z 2025-06-21 04:30:35.379 UTC [29] LOG:  database system was shut down at 2025-06-21 04:29:54 UTC
+2025-06-21T04:30:35.420928557Z 2025-06-21 04:30:35.417 UTC [1] LOG:  database system is ready to accept connections
+2025-06-21T04:30:35.699455527Z 2025-06-21T04:30:35Z INF Starting tunnel tunnelID=8424c5d6-a0bf-48f0-b953-18596b837739
+2025-06-21T04:30:35.699708169Z 2025-06-21T04:30:35Z INF Version 2025.6.1 (Checksum 3fb284297d8f32a6e5d23510f894dbedeca95d92a80fcbf9aa75e86df8fd275c)
+2025-06-21T04:30:35.699714095Z 2025-06-21T04:30:35Z INF GOOS: linux, GOVersion: go1.24.4, GoArch: amd64
+2025-06-21T04:30:35.699717286Z 2025-06-21T04:30:35Z INF Settings: map[no-autoupdate:true]
+2025-06-21T04:30:35.699720671Z 2025-06-21T04:30:35Z INF Environmental variables map[TUNNEL_TOKEN:*****]
+2025-06-21T04:30:35.712984504Z 2025-06-21T04:30:35Z INF Generated Connector ID: 73eba37b-f8b7-48e7-ba0d-f9cac8a2961e
+2025-06-21T04:30:35.727912934Z 2025-06-21T04:30:35Z INF Initial protocol quic
+2025-06-21T04:30:35.746285923Z 2025-06-21T04:30:35Z INF ICMP proxy will use 172.18.0.4 as source for IPv4
+2025-06-21T04:30:35.839827787Z 2025-06-21T04:30:35Z INF ICMP proxy will use ::1 in zone lo as source for IPv6
+2025-06-21T04:30:35.867889277Z 2025-06-21T04:30:35Z INF ICMP proxy will use 172.18.0.4 as source for IPv4
+2025-06-21T04:30:35.873238247Z 2025-06-21T04:30:35Z INF Tunnel connection curve preferences: [X25519MLKEM768 CurveID(25497) CurveP256] connIndex=0 event=0 ip=198.41.192.7
+2025-06-21T04:30:35.873302969Z 2025/06/21 04:30:35 failed to sufficiently increase receive buffer size (was: 208 kiB, wanted: 7168 kiB, got: 416 kiB). See https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes for details.
+2025-06-21T04:30:35.903102379Z 2025-06-21T04:30:35Z INF ICMP proxy will use ::1 in zone lo as source for IPv6
+2025-06-21T04:30:35.903998975Z 2025-06-21T04:30:35Z INF Starting metrics server on [::]:20241/metrics
+2025-06-21T04:30:36.563029877Z 2025-06-21T04:30:36Z INF Registered tunnel connection connIndex=0 connection=878294aa-14c6-427a-aba5-18455c6c07cc event=0 ip=198.41.192.7 location=mel02 protocol=quic
+2025-06-21T04:30:36.563063745Z 2025-06-21T04:30:36Z INF Tunnel connection curve preferences: [X25519MLKEM768 CurveID(25497) CurveP256] connIndex=1 event=0 ip=198.41.200.63
+2025-06-21T04:30:36.570807205Z 2025-06-21T04:30:36Z INF Updated to new configuration config="{\"ingress\":[{\"hostname\":\"ryancs.com.au\",\"originRequest\":{\"connectTimeout\":180},\"service\":\"http://nginx:80\"},{\"service\":\"http_status:404\"}],\"warp-routing\":{\"enabled\":false}}" version=5
+2025-06-21T04:30:36.936149408Z 2025-06-21T04:30:36Z INF Registered tunnel connection connIndex=1 connection=2bdb455c-ec48-448a-9ff0-70d496ef92fb event=0 ip=198.41.200.63 location=syd07 protocol=quic
+2025-06-21T04:30:37.563289388Z 2025-06-21T04:30:37Z INF Tunnel connection curve preferences: [X25519MLKEM768 CurveID(25497) CurveP256] connIndex=2 event=0 ip=198.41.192.57
+2025-06-21T04:30:37.855615039Z 2025-06-21T04:30:37Z INF Registered tunnel connection connIndex=2 connection=e24eb4cc-2eb0-4b97-9fe6-2df02c214ef8 event=0 ip=198.41.192.57 location=mel02 protocol=quic
+2025-06-21T04:30:38.564746612Z 2025-06-21T04:30:38Z INF Tunnel connection curve preferences: [X25519MLKEM768 CurveID(25497) CurveP256] connIndex=3 event=0 ip=198.41.200.73
+2025-06-21T04:30:38.994873334Z 2025-06-21T04:30:38Z INF Registered tunnel connection connIndex=3 connection=c22dad74-b020-4e65-a7c4-ceec6153be38 event=0 ip=198.41.200.73 location=syd07 protocol=quic
+2025-06-21T04:30:36.301880694Z [2025-06-21 04:30:36 +0000] [1] [INFO] Starting gunicorn 21.2.0
+2025-06-21T04:30:36.301906362Z [2025-06-21 04:30:36 +0000] [1] [INFO] Listening at: http://0.0.0.0:5000 (1)
+2025-06-21T04:30:36.301910579Z [2025-06-21 04:30:36 +0000] [1] [INFO] Using worker: sync
+2025-06-21T04:30:36.308070994Z [2025-06-21 04:30:36 +0000] [8] [INFO] Booting worker with pid: 8
+2025-06-21T04:30:35.164127574Z 
+2025-06-21T04:30:35.164172551Z PostgreSQL Database directory appears to contain a database; Skipping initialization
+2025-06-21T04:30:35.164223922Z 
+2025-06-21T04:30:35.274871067Z 2025-06-21 04:30:35.273 UTC [1] LOG:  starting PostgreSQL 15.13 on x86_64-pc-linux-musl, compiled by gcc (Alpine 14.2.0) 14.2.0, 64-bit
+2025-06-21T04:30:35.274889751Z 2025-06-21 04:30:35.273 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2025-06-21T04:30:35.274893546Z 2025-06-21 04:30:35.273 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2025-06-21T04:30:35.276353519Z 2025-06-21 04:30:35.276 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2025-06-21T04:30:35.284325143Z 2025-06-21 04:30:35.283 UTC [28] LOG:  database system was shut down at 2025-06-21 04:29:55 UTC
+2025-06-21T04:30:35.296495819Z 2025-06-21 04:30:35.296 UTC [1] LOG:  database system is ready to accept connections
+2025-06-21T04:30:34.199564552Z [s6-init] making user provided files available at /var/run/s6/etc...exited 0.
+2025-06-21T04:30:34.283089858Z [s6-init] ensuring user provided files have correct perms...exited 0.
+2025-06-21T04:30:34.285418513Z [fix-attrs.d] applying ownership & permissions fixes...
+2025-06-21T04:30:34.289872233Z [fix-attrs.d] done.
+2025-06-21T04:30:34.291394875Z [cont-init.d] executing container initialization scripts...
+2025-06-21T04:30:34.296661712Z [cont-init.d] 30-cloudflare-setup: executing... 
+2025-06-21T04:30:35.303686203Z DNS Zone: ryancs.com.au (f89cd1e7cc13d65b2c161ed7a40d2748)
+2025-06-21T04:30:35.616198901Z DNS Record: ryancs.com.au (81646c94ba0f6d16979dee4ecd1bd8e9)
+2025-06-21T04:30:35.619022788Z [cont-init.d] 30-cloudflare-setup: exited 0.
+2025-06-21T04:30:35.622444653Z [cont-init.d] 50-ddns: executing... 
+2025-06-21T04:30:36.027269572Z No DNS update required for ryancs.com.au (43.245.153.2).
+2025-06-21T04:30:36.028376630Z [cont-init.d] 50-ddns: exited 0.
+2025-06-21T04:30:36.029460629Z [cont-init.d] done.
+2025-06-21T04:30:36.032807648Z [services.d] starting services
+2025-06-21T04:30:36.059584735Z crond: crond (busybox 1.31.1) started, log level 6
+2025-06-21T04:30:36.059645876Z Starting crond...
+2025-06-21T04:30:36.065559462Z [services.d] done.
+2025-06-21T04:35:00.061539560Z crond: USER root pid 242 cmd /etc/cont-init.d/50-ddns
+2025-06-21T04:35:00.726651327Z No DNS update required for ryancs.com.au (43.245.153.2).
+2025-06-21T04:35:35.362348879Z 2025-06-21 04:35:35.359 UTC [26] LOG:  checkpoint sta--- FILE_END: ./palproj/palproj_combined_live.log
+
+--- FILE_START: ./palproj/.gitignore
+--- CONTENT_START ---
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Docker
+.dockerignore
+
+# Environment variables
+.env
+*.env
+
+# Editor files
+*.swp
+
+# User uploaded files
+app/uploads/
+--- FILE_END: ./palproj/.gitignore
+
+--- FILE_START: ./palproj/AI_CONTEXT.md
+--- CONTENT_START ---
+[START CONTEXT]
+
+Here's some ongoing context about my project and setup:
+
+**Project Goal:** Setting up an LLM (Large Language Model) on a home machine for personal use and development.
+
+**Portability Strategy:**
+* **Primary Goal:** To ensure extreme ease of migration to new machines.
+* **Methodology:** Everything will be managed via **GitHub** and deployed using **Docker containers**.
+
+**LLM Status:**
+* Currently using a Google API key for LLM access.
+* **Future Plan:** May transition to using a local, home-based LLM model.
+* **Current Progress:** Have successfully completed a proof-of-concept (PoC) using a single-session Flask application integrated with LangChain.
+
+**Development Environment:**
+* **Current:** Working on an Ubuntu Virtual Machine (VM) running on a laptop.
+* **Future Plan:** Acquiring and setting up a dedicated home server for this project.
+
+**Infrastructure & Deployment:**
+* **Home Server Plan:** Will be the primary host for the LLM and related services.
+* **Website:** Planning to run a website on the home server.
+* **Security:** Leveraging Cloudflare for website security (no public IP address will be exposed directly from the home server).
+* **Containerization:** Will be extensively using Docker for containerizing applications and services.
+* **Version Control:** Utilizing Git/GitHub for all code management and version control.
+
+**Learning Focus:**
+* **Key Learning Area:** Need to learn and become proficient with **GitHub** (as accustomed to older systems like RCS).
+
+**Other considerations:**
+I'm used to 'vi' give me instructions with vi not nano
+
+Stack plan:
+1. Core Components & Their Docker Homes:
+
+Nginx (Web Server / Reverse Proxy)
+
+Docker Container: A dedicated container running the Nginx image.
+Role: This will be your application's entry point from the outside world (or Cloudflare). It will serve static files (HTML, CSS, JS) directly and act as a reverse proxy, forwarding dynamic web requests to your Flask application.
+Files:
+nginx/Dockerfile (optional, often just uses base Nginx image)
+nginx/nginx.conf (configuration for reverse proxying to Flask, serving static files, SSL if needed).
+Flask Application (Python Web App / LangChain / LLM Interface / Image Ingestion Logic)
+
+Docker Container: A custom container built from a Python base image.
+Role: This is your main application logic. It will handle web requests from Nginx, process user input, interact with LangChain for LLM calls (Google API initially), perform image ingestion/processing, and communicate with the PostgreSQL database for chat history. It will run using a production WSGI server like Gunicorn.
+Files:
+app/Dockerfile (defines how to build your Python app image, including installing dependencies from requirements.txt).
+app/requirements.txt (lists Python packages like Flask, LangChain, psycopg2-binary, Pillow/OpenCV, etc.).
+app/main.py (or similar, your Flask application code).
+app/config.py (application configuration).
+PostgreSQL Database
+
+Docker Container: A dedicated container running the official PostgreSQL image.
+Role: Stores your application's persistent data, primarily chat history, user data, or any other information your Flask app needs to save.
+Files:
+Typically uses the official PostgreSQL Docker image directly, so no custom Dockerfile is usually needed.
+Database configurations and initial scripts can be mounted as volumes or set via environment variables in docker-compose.yml.
+2. Orchestration with Docker Compose:
+
+All these services will be defined and managed in a single docker-compose.yml file at the root of your palproj directory. This file declares your services, their images, ports, volumes, environment variables, and network dependencies.
+A single docker compose up -d command will start all three services in their own isolated containers, connected on an internal Docker network.
+3. Inter-Container Communication:
+
+Nginx to Flask: Nginx will forward requests to the Flask container using its service name (e.g., http://flask_app:8000) within the Docker Compose network. Gunicorn will be listening on a port inside the Flask container (e.g., 8000).
+Flask to PostgreSQL: The Flask application will connect to the PostgreSQL container using its service name (e.g., postgresql_db:5432) within the Docker Compose network, along with credentials.
+External Access: Only the Nginx container's port 80 (and 443 for HTTPS) will be exposed to your host machine's network. All other containers communicate internally and are not directly exposed to the outside.
+4. Cloudflare Integration:
+
+Cloudflare will point to your home server's public IP (which Nginx will be listening on) or use a tunnel if you have no public IP.
+Nginx will receive requests from Cloudflare (which handles initial security and DDoS protection).
+Your nginx.conf will be configured to handle these requests and pass them to Flask.
+5. Future Consideration (Local LLM):
+
+If you transition to a local LLM (e.g., using Ollama or a Hugging Face model server), this would ideally be another separate Docker container.
+Your Flask application (LangChain) would then communicate with this local LLM container (e.g., http://local_llm_service:11434 for Ollama) instead of the external Google API. This keeps your LLM model isolated and easily swappable.
+Project Structure within ~/palproj (Example):
+
+palproj/
+â”œâ”€â”€ app/
+â”‚   â”œâ”€â”€ Dockerfile             # Builds your Flask application image
+â”‚   â”œâ”€â”€ requirements.txt       # Python dependencies
+â”‚   â”œâ”€â”€ main.py                # Your Flask app code
+â”‚   â””â”€â”€ (other Flask files, templates, static, etc.)
+â”œâ”€â”€ nginx/
+â”‚   â””â”€â”€ nginx.conf             # Nginx configuration
+â”œâ”€â”€ .gitignore                 # Files Git should ignore (e.g., .env, __pycache__)
+â”œâ”€â”€ docker-compose.yml         # Defines and links all your Docker services
+â””â”€â”€ AI_CONTEXT.md              # Your context file
+
+This setup provides a highly modular, portable, and maintainable foundation for your project, allowing each component to be developed, updated, and scaled independently.
+
+Update with total docker plan...
+
+The QAD LLM Project Stack (Proposed & Complete)
+Here's the comprehensive list of the Docker services we'll be using:
+
+cloudflare-tunnel (Cloudflare cloudflared container)
+
+Purpose: Establishes a secure, outbound-only tunnel from your host machine to the Cloudflare network. It allows Cloudflare to route external traffic to your nginx container without exposing your home server's public IP address or opening inbound ports.
+nginx
+
+Purpose: The web server and reverse proxy. It receives secure traffic from the cloudflare-tunnel and forwards it to your app container, while also serving any static website content.
+app_db (PostgreSQL)
+
+Purpose: Your traditional relational database, dedicated to storing application data like user sessions, chat history, or any other transactional data from your Flask application.
+vector_db (PostgreSQL with pgvector)
+
+Purpose: A dedicated PostgreSQL instance, specifically optimized for storing and performing similarity searches on the numerical embeddings (vectors) of your OpenEdge code. This is the core knowledge base for the LLM.
+ingestion (Python Application)
+
+Purpose: A standalone, batch-oriented application that pulls your OpenEdge code from Git, processes it, converts it into embeddings, and loads these embeddings into the vector_db.
+app (Python Flask Application with LangChain)
+
+Purpose: Your main Flask web application. It handles user requests, orchestrates calls to the vector_db for relevant code context, sends prompts to the Gemini LLM, and manages application-specific data in app_db.
+Data Flow: How QAD Code Becomes LLM Knowledge (Complete, with Cloudflare)
+The flow of data, particularly your OpenEdge code, can be broken down into two main phases, with Cloudflare acting as the secure gateway:
+
+Phase 1: Ingestion (Building the Knowledge Base)
+
+This phase happens offline or on a scheduled basis to populate and update the vector_db.
+
+Source Code (Git Repository):
+
+Your OpenEdge .p and custom .i files reside in a dedicated Git repository. This repository is the definitive source of truth for your QAD codebase.
+ingestion Container Activation:
+
+The ingestion Docker container is started (either manually, via a scheduled cron job, or a Git webhook).
+Action: Inside the container, the Python script first performs a git clone or git pull operation to fetch the absolute latest version of your OpenEdge code from the Git repository.
+Code Processing (ingestion script):
+
+Reading & Filtering: The script reads through the cloned .p and custom .i files. It applies logic to identify relevant files and potentially their relationships (e.g., which .p files INCLUDE which .i files).
+Chunking: The code is broken down into smaller, semantically meaningful "chunks." This is where the OpenEdge-aware splitting logic (e.g., splitting by PROCEDURE, FUNCTION, or specific code blocks) comes into play, along with overlaps to maintain context.
+Metadata Extraction: For each chunk, relevant metadata is extracted (e.g., original filename, procedure name, a flag indicating if it's an include file).
+Embedding Generation: Each text chunk is sent to Google's text-embedding-004 API. This API converts the text into a high-dimensional numerical vector (embedding) that captures its semantic meaning.
+Storage (vector_db):
+
+The ingestion script connects to the vector_db (your dedicated PostgreSQL with pgvector).
+Action: It inserts each chunk's original text, its extracted metadata, and its newly generated numerical embedding into the pgvector table within vector_db.
+Outcome: The vector_db now holds a searchable, semantically rich representation of your entire QAD codebase.
+Phase 2: Query & Response (Interacting with the LLM via Cloudflare)
+
+This phase happens in real-time when a user asks a question via your external domain.
+
+External Request (Cloudflare DNS & Tunnel):
+
+A user accesses your application via your Cloudflare-managed domain (e.g., your-qad-llm.com). Cloudflare's DNS directs traffic to its edge network.
+cloudflare-tunnel (on your server): This Docker container maintains an active, secure outbound connection to Cloudflare's edge. When Cloudflare receives a request for your domain, it forwards it through this established tunnel directly to your nginx container.
+Web Server (nginx):
+
+Action: nginx receives the request from the Cloudflare tunnel. It either serves static files directly (e.g., your index.html) or, for API/app requests, acts as a reverse proxy, forwarding them to your app container.
+User Query (app):
+
+The app (Flask application) receives the user's query (e.g., "How does order_entry.p handle inventory adjustments?").
+Query Embedding (app):
+
+Action: It sends this user query to Google's text-embedding-004 API (the same embedding model used during ingestion) to convert the query into its own numerical embedding.
+Semantic Search (vector_db):
+
+The app sends the user query's embedding to the vector_db.
+Action: vector_db performs a similarity search (using pgvector) to find the most relevant code chunks in its database. It looks for stored code embeddings that are numerically "closest" to the query embedding, indicating semantic similarity.
+Outcome: vector_db returns the top N most relevant code chunks (their original text and metadata) back to the app.
+Contextualized Prompt (app & Gemini):
+
+The app (using LangChain) takes the user's original query and combines it with the retrieved relevant code chunks. This forms a comprehensive "contextualized prompt."
+Action: This combined prompt is then sent to the Google Gemini Pro LLM API.
+LLM Response (Gemini):
+
+Action: The Gemini Pro LLM processes the contextualized prompt. It uses its vast knowledge and the specific code context provided to understand the query and generate a coherent, accurate, and helpful answer.
+Outcome: The LLM sends its generated answer back to the app.
+Display & History (app & app_db):
+
+The app receives the LLM's answer.
+Action: It displays the answer to the user through the web interface (served back through nginx and the cloudflare-tunnel). Optionally, it also saves the user's query and the LLM's response into the app_db (PostgreSQL) for chat history, ensuring a separate record of interactions.
+This revised walkthrough truly completes the end-to-end data flow, integrating Cloudflare as your secure front door. It should be perfect for updating your project plan!
+
+[END CONTEXT]
+
+
+FRONT END PLAN:
+Okay, understood. The user uploading a program they are working on for ad-hoc analysis (not for bulk codebase ingestion via Git) is a key clarification. This means the file upload is for temporary, user-specific context for the RAG, rather than permanent knowledge base updates.
+
+Here's the refined frontend plan in a format you can add to your project documentation, incorporating all the discussed points:
+
+Frontend Project Plan (QAD LLM Project)
+1. Project Goal:
+To provide a spartan, functional web interface for the OpenEdge RAG (Retrieval-Augmented Generation) system, enabling user interaction with the LLM, context provision through code/image uploads, and download of generated or retrieved content.
+
+2. Frontend Technology Stack:
+
+Primary: Plain HTML, CSS, and Vanilla JavaScript. This choice aligns with the "spartan" requirement and offers maximum control for implementing specific file/image handling features.
+Serving: Nginx will exclusively serve all static frontend assets (HTML, CSS, JavaScript) from its /usr/share/nginx/html directory, mapped from palproj/nginx/html.
+Future Considerations: If the complexity of the UI or the need for component reusability increases significantly, a lightweight JavaScript framework (e.g., Alpine.js, htmx, or even a minimal Vue.js setup) could be considered, but the current focus is on essential functionality with minimal overhead.
+3. Core Frontend Functionalities:
+
+* **RAG Query Interface:**
+    * A prominent text input area for users to type their OpenEdge-related queries.
+    * A dynamic display area to present the LLM's generated answers and potentially the retrieved code chunks that informed the answer.
+* **Ad-hoc Code/File Upload for Context:**
+    * A dedicated section with a "Browse File" button and/or a drag-and-drop zone.
+    * Allows users to upload individual OpenEdge program files (`.p`, `.w`, `.t`, `.i`) or other relevant text-based documents that they are currently working on.
+    * **Purpose:** These files are uploaded to provide *immediate, temporary context* for the current RAG session, allowing the LLM to consider the user's specific work-in-progress code in its response. This is distinct from the bulk ingestion process handled by the `ingestion` service, which builds the permanent vector database from the Git repository.
+    * Upon upload, these files will be sent to a new Flask endpoint (e.g., `/app/upload_context`) for processing (e.g., temporary storage, chunking, and immediate embedding for the current query, or short-term session-based vector storage).
+* **Image-to-Text (OCR) Feature:**
+    * A designated area where users can paste images directly (from clipboard) or drop image files.
+    * Client-side JavaScript will capture the image data from `paste` or `drop` events.
+    * The image data will be sent to a new Flask endpoint (e.g., `/app/ocr`).
+    * **Purpose:** The backend will perform Optical Character Recognition (OCR) on the image and return the extracted text. This extracted text is *not* for embedding into the long-term knowledge base but rather to populate the main RAG query input field, allowing the user to easily submit text from an image as part of their query. *No complex image analysis or object recognition is required or intended.*
+* **File Download Functionality:**
+    * **Generated Content Download:** Provide clickable links or buttons to download code snippets, configuration files, or summarized reports generated by the LLM.
+    * **Retrieved Original Source Code Download:** Allow users to download the full original OpenEdge source files that were identified as relevant by the RAG system. This would enable users to examine the complete context of a retrieved code chunk directly. This would involve the Flask `app` serving these files from the `CODE_REPO_PATH` volume mount.
+4. User Authentication and Context (Future Phase):
+
+* Implementation of user login and logout forms.
+* Frontend management of authentication tokens or session identifiers to enable context remembering for individual users. This will involve storing session details in `app_db`.
+5. Interface Design Philosophy:
+
+* **Spartan and Functional:** The primary focus is on clear layout and intuitive interaction for the core RAG, ad-hoc file context, and image-to-text functionalities. Visual aesthetics will be minimal.
+* **Usability:** Components will be designed for ease of use, ensuring a straightforward workflow for querying, providing context, and retrieving information.
+6. Development Workflow:
+
+* Frontend static files (`index.html`, `style.css`, `app.js`, etc.) will reside directly within the `palproj/nginx/html` directory.
+* Development iterations will involve directly modifying these files and refreshing the browser to see changes.
+* All API calls from the frontend JavaScript (`app.js`) will target the Flask application via Nginx, using paths like `/app/chat/`, `/app/upload_context`, `/app/ocr`, and `/app/download/`. Nginx will act as the reverse proxy, forwarding these requests to the `app` Docker container.
+
+
+Start project:
+docker compose up --build -d
+
+Stop project:
+docker compose down
+--- FILE_END: ./palproj/AI_CONTEXT.md
+
+--- FILE_START: ./palproj/app/main.py
+--- CONTENT_START ---
+# app/main.py
+
+import logging
+from flask import Flask, request, jsonify, send_from_directory
+from flask_migrate import Migrate
+import os
+from dotenv import load_dotenv
+
+import uuid # For unique filenames for uploaded files
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.schema import HumanMessage, SystemMessage
+
+# We will need these if we decide to process uploaded files into embeddings on-the-fly
+# from langchain_community.vectorstores import PGVector
+# from langchain_community.document_loaders import TextLoader
+# from langchain_text_splitters import RecursiveCharacterTextSplitter
+# from langchain_google_genai import GoogleGenerativeAIEmbeddings
+# from langchain.chains import RetrievalQA
+
+load_dotenv() # Load environment variables from .env
+
+app = Flask(__name__)
+
+# --- Configure Logging ---
+log_level_str = os.getenv('LOG_LEVEL', 'INFO').upper() # Get LOG_LEVEL from .env
+log_level = getattr(logging, log_level_str, logging.INFO)
+
+# Remove any default Flask/Gunicorn handlers to ensure only our handler is active
+for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)
+
+# Configure basic logging to stdout/stderr (which Docker captures)
+logging.basicConfig(
+    level=log_level,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler() # Directs logs to console (stdout/stderr)
+    ]
+)
+app.logger.setLevel(log_level) # Set Flask's internal logger level
+# --- END Configure Logging -
+
+
+# Configure your PostgreSQL database for app data (from your proj_dump)
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('APP_DATABASE_URL')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# --- Google API Key for LLM ---
+google_api_key = os.getenv("GOOGLE_API_KEY")
+print(f"DEBUG APP START: GOOGLE_API_KEY from os.getenv: {google_api_key}") # ADD THIS LINE FOR DEBUGGING
+
+if not google_api_key or google_api_key == "your_google_api_key_here":
+    app.logger.error("GOOGLE_API_KEY is not configured. LLM calls will fail.")
+    # For production, you might want to stop the app or raise an error here.
+    # For development, we'll let it proceed and return an error from the chat endpoint.
+
+# Initialize your LLM (from your proj_dump)
+llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=google_api_key)
+
+# This is where your vector store is configured, from proj_dump.txt
+COLLECTION_NAME = "qad_code_embeddings"
+PG_EMBEDDING_CONNECTION_STRING = os.getenv("PG_EMBEDDING_CONNECTION_STRING")
+
+# --- New: File Upload Configuration ---
+UPLOAD_FOLDER = 'uploads' # Folder inside the app container
+# Ensure the upload directory exists
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
+
+# Global variable to store content of the last uploaded file for temporary context
+# NOTE: This is a *very simple* in-memory solution and will not scale or persist across requests/users.
+# For a real application, you'd integrate this with sessions, a temporary DB, or direct RAG processing.
+last_uploaded_file_content = ""
+
+
+@app.route('/')
+def home():
+    return "Hello from Flask App! The frontend should be at /."
+
+# Placeholder for a database test route (from your dump)
+@app.route('/db_test')
+def db_test():
+    try:
+        # Example: Replace with an actual DB query to test connection
+        # from sqlalchemy import text
+        # db.session.execute(text("SELECT 1"))
+        return jsonify({"status": "Database connection seems OK (placeholder for actual test)"})
+    except Exception as e:
+        return jsonify({"status": "Database connection error", "error": str(e)}), 500
+
+# Your COMBINED RAG chat endpoint
+@app.route('/chat/<path:query>', methods=['GET', 'POST']) # <-- CORRECTED THIS LINE
+def chat(query):
+    global last_uploaded_file_content # Access the global variable
+
+    if not google_api_key or google_api_key == "your_google_api_key_here":
+        return jsonify({"response": "Error: Google API Key not configured in .env"}), 500
+
+    try:
+        # --- ORIGINAL LANGCHAIN RAG LOGIC RE-INTEGRATED ---
+        # Add the context from the last uploaded file to the query
+        effective_query = query
+        if last_uploaded_file_content:
+            effective_query = f"Here is some relevant context:\n{last_uploaded_file_content}\n\nBased on this context and the following question: {query}"
+            app.logger.info(f"Using uploaded file content as context for query: {query}")
+        
+        messages = [
+            SystemMessage(content="You are a helpful AI assistant for OpenEdge code. Provide concise and relevant information based on the user's query and any provided context."),
+            HumanMessage(content=effective_query),
+        ]
+        
+        llm_response_object = llm.invoke(messages)
+        llm_response_content = llm_response_object.content # Extract content from the LangChain response object
+        # --- END ORIGINAL LANGCHAIN RAG LOGIC ---
+
+        return jsonify({"query": query, "response": llm_response_content})
+
+    except Exception as e:
+        app.logger.error(f"Error communicating with LLM: {e}")
+        return jsonify({"response": f"Error communicating with LLM: {str(e)}"}), 500
+
+
+@app.route('/upload_context', methods=['POST']) # <-- THIS WAS ALREADY CORRECTED BY YOU, GOOD.
+def upload_context():
+    global last_uploaded_file_content # Declare intent to modify global
+
+    if 'file' not in request.files:
+        return jsonify({"message": "No file part in the request"}), 400
+
+    file = request.files['file']
+
+    if file.filename == '':
+        return jsonify({"message": "No selected file"}), 400
+
+    if file:
+        # Generate a unique filename to prevent conflicts
+        unique_filename = str(uuid.uuid4()) + "_" + file.filename
+        filepath = os.path.join(UPLOAD_FOLDER, unique_filename)
+        file.save(filepath)
+
+        file_content = ""
+        try:
+            # Attempt to read content for text-based files
+            with open(filepath, 'r', encoding='utf-8') as f:
+                file_content = f.read()
+            app.logger.info(f"File '{unique_filename}' uploaded and content read. Length: {len(file_content)}")
+            
+            # Store content in the global variable for temporary context
+            last_uploaded_file_content = file_content
+
+        except Exception as e:
+            app.logger.error(f"Error reading uploaded file {unique_filename}: {e}")
+            last_uploaded_file_content = "" # Clear if error reading
+            return jsonify({"message": "File uploaded but failed to read content", "filename": unique_filename, "error": str(e)}), 500
+
+        return jsonify({
+            "message": "File uploaded successfully",
+            "filename": unique_filename,
+            "original_filename": file.filename,
+            "file_size": file.content_length,
+        }), 200
+
+    return jsonify({"message": "File upload failed"}), 500
+
+@app.route('/download/<filename>', methods=['GET']) # <-- THIS WAS MISSING /app/, NOW CORRECTED AS DISCUSSED
+def download_file(filename):
+    try:
+        # This will serve files from the UPLOAD_FOLDER
+        return send_from_directory(UPLOAD_FOLDER, filename, as_attachment=True)
+    except FileNotFoundError:
+        return jsonify({"message": "File not found"}), 404
+    except Exception as e:
+        return jsonify({"message": f"Error serving file: {str(e)}"}), 500
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=False)
+--- FILE_END: ./palproj/app/main.py
+
+--- FILE_START: ./palproj/app/migrations/env.py
+--- CONTENT_START ---
+import logging
+from logging.config import fileConfig
+
+from flask import current_app
+
+from alembic import context
+
+# this is the Alembic Config object, which provides
+# access to the values within the .ini file in use.
+config = context.config
+
+# Interpret the config file for Python logging.
+# This line sets up loggers basically.
+fileConfig(config.config_file_name)
+logger = logging.getLogger('alembic.env')
+
+
+def get_engine():
+    try:
+        # this works with Flask-SQLAlchemy<3 and Alchemical
+        return current_app.extensions['migrate'].db.get_engine()
+    except (TypeError, AttributeError):
+        # this works with Flask-SQLAlchemy>=3
+        return current_app.extensions['migrate'].db.engine
+
+
+def get_engine_url():
+    try:
+        return get_engine().url.render_as_string(hide_password=False).replace(
+            '%', '%%')
+    except AttributeError:
+        return str(get_engine().url).replace('%', '%%')
+
+
+# add your model's MetaData object here
+# for 'autogenerate' support
+# from myapp import mymodel
+# target_metadata = mymodel.Base.metadata
+config.set_main_option('sqlalchemy.url', get_engine_url())
+target_db = current_app.extensions['migrate'].db
+
+# other values from the config, defined by the needs of env.py,
+# can be acquired:
+# my_important_option = config.get_main_option("my_important_option")
+# ... etc.
+
+
+def get_metadata():
+    if hasattr(target_db, 'metadatas'):
+        return target_db.metadatas[None]
+    return target_db.metadata
+
+
+def run_migrations_offline():
+    """Run migrations in 'offline' mode.
+
+    This configures the context with just a URL
+    and not an Engine, though an Engine is acceptable
+    here as well.  By skipping the Engine creation
+    we don't even need a DBAPI to be available.
+
+    Calls to context.execute() here emit the given string to the
+    script output.
+
+    """
+    url = config.get_main_option("sqlalchemy.url")
+    context.configure(
+        url=url, target_metadata=get_metadata(), literal_binds=True
+    )
+
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def run_migrations_online():
+    """Run migrations in 'online' mode.
+
+    In this scenario we need to create an Engine
+    and associate a connection with the context.
+
+    """
+
+    # this callback is used to prevent an auto-migration from being generated
+    # when there are no changes to the schema
+    # reference: http://alembic.zzzcomputing.com/en/latest/cookbook.html
+    def process_revision_directives(context, revision, directives):
+        if getattr(config.cmd_opts, 'autogenerate', False):
+            script = directives[0]
+            if script.upgrade_ops.is_empty():
+                directives[:] = []
+                logger.info('No changes in schema detected.')
+
+    conf_args = current_app.extensions['migrate'].configure_args
+    if conf_args.get("process_revision_directives") is None:
+        conf_args["process_revision_directives"] = process_revision_directives
+
+    connectable = get_engine()
+
+    with connectable.connect() as connection:
+        context.configure(
+            connection=connection,
+            target_metadata=get_metadata(),
+            **conf_args
+        )
+
+        with context.begin_transaction():
+            context.run_migrations()
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
+--- FILE_END: ./palproj/app/migrations/env.py
+
+--- FILE_START: ./palproj/app/migrations/README
+--- CONTENT_START ---
+Single-database configuration for Flask.
+--- FILE_END: ./palproj/app/migrations/README
+
+--- FILE_START: ./palproj/app/migrations/script.py.mako
+--- CONTENT_START ---
+"""${message}
+
+Revision ID: ${up_revision}
+Revises: ${down_revision | comma,n}
+Create Date: ${create_date}
+
+"""
+from alembic import op
+import sqlalchemy as sa
+${imports if imports else ""}
+
+# revision identifiers, used by Alembic.
+revision = ${repr(up_revision)}
+down_revision = ${repr(down_revision)}
+branch_labels = ${repr(branch_labels)}
+depends_on = ${repr(depends_on)}
+
+
+def upgrade():
+    ${upgrades if upgrades else "pass"}
+
+
+def downgrade():
+    ${downgrades if downgrades else "pass"}
+--- FILE_END: ./palproj/app/migrations/script.py.mako
+
+--- FILE_START: ./palproj/app/migrations/versions/290eb81a6e68_initial_chat_history_table.py
+--- CONTENT_START ---
+"""Initial chat history table
+
+Revision ID: 290eb81a6e68
+Revises: 
+Create Date: 2025-06-14 07:23:32.027358
+
+"""
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision = '290eb81a6e68'
+down_revision = None
+branch_labels = None
+depends_on = None
+
+
+def upgrade():
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.create_table('chat_history',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('session_id', sa.String(length=255), nullable=False),
+    sa.Column('user_message', sa.Text(), nullable=False),
+    sa.Column('bot_response', sa.Text(), nullable=False),
+    sa.Column('timestamp', sa.DateTime(), server_default=sa.text('now()'), nullable=True),
+    sa.PrimaryKeyConstraint('id')
+    )
+    # ### end Alembic commands ###
+
+
+def downgrade():
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_table('chat_history')
+    # ### end Alembic commands ###
+--- FILE_END: ./palproj/app/migrations/versions/290eb81a6e68_initial_chat_history_table.py
+
+--- FILE_START: ./palproj/app/migrations/alembic.ini
+--- CONTENT_START ---
+# A generic, single database configuration.
+
+[alembic]
+# template used to generate migration files
+# file_template = %%(rev)s_%%(slug)s
+
+# set to 'true' to run the environment during
+# the 'revision' command, regardless of autogenerate
+# revision_environment = false
+
+
+# Logging configuration
+[loggers]
+keys = root,sqlalchemy,alembic,flask_migrate
+
+[handlers]
+keys = console
+
+[formatters]
+keys = generic
+
+[logger_root]
+level = WARN
+handlers = console
+qualname =
+
+[logger_sqlalchemy]
+level = WARN
+handlers =
+qualname = sqlalchemy.engine
+
+[logger_alembic]
+level = INFO
+handlers =
+qualname = alembic
+
+[logger_flask_migrate]
+level = INFO
+handlers =
+qualname = flask_migrate
+
+[handler_console]
+class = StreamHandler
+args = (sys.stderr,)
+level = NOTSET
+formatter = generic
+
+[formatter_generic]
+format = %(levelname)-5.5s [%(name)s] %(message)s
+datefmt = %H:%M:%S
+--- FILE_END: ./palproj/app/migrations/alembic.ini
+
+--- FILE_START: ./palproj/app/requirements.txt
+--- CONTENT_START ---
+Flask==2.3.3
+gunicorn==21.2.0
+psycopg2-binary==2.9.9
+Flask-SQLAlchemy==3.1.1
+Flask-Migrate==4.0.5
+langchain==0.2.13
+langchain-google-genai==1.0.10
+langchain-community==0.2.12
+gunicorn==21.2.0
+python-dotenv==1.0.0
+--- FILE_END: ./palproj/app/requirements.txt
+
+--- FILE_START: ./palproj/app/Dockerfile
+--- CONTENT_START ---
+# Use a slim Python base image for smaller size
+FROM python:3.10-slim-bookworm
+
+# Set the working directory inside the container
+WORKDIR /app
+
+# Copy the requirements file into the container
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of your application code into the container
+COPY . .
+
+# Expose the port your Flask app will run on
+EXPOSE 5000
+
+# Command to run the Flask application using Gunicorn
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "600", "main:app"]
+--- FILE_END: ./palproj/app/Dockerfile
+
+--- FILE_START: ./palproj/app/uploads/d5de1040-451a-4f2e-912b-3b2eef9b0df0_a.p
+--- CONTENT_START ---
+message "hello world". pause.
+--- FILE_END: ./palproj/app/uploads/d5de1040-451a-4f2e-912b-3b2eef9b0df0_a.p
+
+--- FILE_START: ./palproj/app/uploads/f8aa1e5f-b061-4a75-8d9e-c45322b90aff_dump_project.sh
+--- CONTENT_START ---
+#!/bin/bash
+
+# This script recursively lists all regular files in the current directory
+# and outputs their content with clear markers.
+
+START_MARKER="--- FILE_START: "
+END_MARKER="--- FILE_END: "
+SEPARATOR_MARKER="--- CONTENT_START ---"
+
+echo "--- PROJECT DUMP START ---"
+echo ""
+
+# Find all regular files in the current directory and its subdirectories
+# -print0 ensures correct handling of filenames with spaces or special characters
+find . -type f ! -path '*/.env' -print0 | while IFS= read -r -d $'\0' file; do
+    # Skip Git internal files
+    if [[ "$file" == "./.git/"* ]]; then
+        continue
+    fi
+    # Skip Python bytecode files
+    if [[ "$file" == *.pyc ]]; then # Corrected line
+        continue
+    fi
+    # Skip __pycache__ directories (though .pyc exclusion handles files within them)
+    if [[ "$file" == *"/__pycache__/"* ]]; then
+        continue
+    fi
+    # Skip script itself if it's in the directory
+    if [[ "$file" == "./dump_project.sh" ]]; then
+        continue
+    fi
+
+    # Output the file path
+    echo "${START_MARKER}${file}"
+    echo "${SEPARATOR_MARKER}"
+
+    # Output file content
+    cat "$file"
+
+    echo "${END_MARKER}${file}"
+    echo "" # Add a blank line for readability between files
+done
+
+echo "--- PROJECT DUMP END ---"
+echo "--- About to Git status ---"
+git status .
+echo "--- end Git status ---"
+
+echo "--- About to Git ls-files ---"
+git ls-files
+echo "--- end Git ls-files ---"
+
+--- FILE_END: ./palproj/app/uploads/f8aa1e5f-b061-4a75-8d9e-c45322b90aff_dump_project.sh
+
+--- PROJECT DUMP END ---
+--- About to Git status ---
+--- end Git status ---
+--- About to Git ls-files ---
+--- end Git ls-files ---

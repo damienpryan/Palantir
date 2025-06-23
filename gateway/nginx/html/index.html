@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Palantir Project RAG</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>QAD OpenEdge RAG Interface</h1>
+
+        <section class="chat-section">
+            <div class="chat-display" id="chat-display">
+                <p>Welcome! Ask me anything about your OpenEdge code.</p>
+            </div>
+            <div class="chat-input-area">
+                <textarea id="user-query" placeholder="Type your query here..." rows="3"></textarea>
+                <button id="send-query">Send Query</button>
+            </div>
+        </section>
+
+        <section class="file-upload-section">
+            <h2>Provide Context (Upload File)</h2>
+            <p>Upload a program or document to provide immediate context for your query.</p>
+            <input type="file" id="context-file-upload">
+            <button id="upload-button">Upload File</button>
+            <div id="upload-status" class="status-message"></div>
+        </section>
+
+        <section class="download-section">
+            <h2>Downloadable Content</h2>
+            <div id="download-links">
+                <p>No downloadable content available yet.</p>
+            </div>
+        </section>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

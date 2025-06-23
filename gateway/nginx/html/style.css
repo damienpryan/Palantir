@@ -1,0 +1,141 @@
+body {
+    font-family: Arial, sans-serif;
+    line-height: 1.6;
+    margin: 0;
+    padding: 20px;
+    background-color: #f4f4f4;
+    color: #333;
+}
+
+.container {
+    max-width: 900px;
+    margin: 20px auto;
+    background: #fff;
+    padding: 20px 30px;
+    border-radius: 8px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+}
+
+h1, h2 {
+    color: #0056b3;
+    text-align: center;
+    margin-bottom: 20px;
+}
+
+section {
+    margin-bottom: 30px;
+    padding: 15px;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    background-color: #f9f9f9;
+}
+
+/* Chat Section Styling */
+.chat-display {
+    height: 300px;
+    border: 1px solid #e0e0e0;
+    padding: 10px;
+    overflow-y: auto;
+    margin-bottom: 15px;
+    background-color: #fff;
+    border-radius: 5px;
+}
+
+.chat-message {
+    margin-bottom: 10px;
+    padding: 8px 12px;
+    border-radius: 15px;
+    max-width: 80%;
+    word-wrap: break-word;
+}
+
+.user-message {
+    background-color: #e6f7ff;
+    align-self: flex-end; /* Not directly used here, but good for flexbox layout */
+    margin-left: auto;
+    border-bottom-right-radius: 2px;
+}
+
+.ai-message {
+    background-color: #f0f0f0;
+    align-self: flex-start; /* Not directly used here */
+    margin-right: auto;
+    border-bottom-left-radius: 2px;
+}
+
+.system-message {
+    font-style: italic;
+    color: #666;
+    text-align: center;
+    margin-bottom: 10px;
+}
+
+.chat-input-area {
+    display: flex;
+    gap: 10px;
+}
+
+textarea#user-query {
+    flex-grow: 1;
+    padding: 10px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    resize: vertical;
+    min-height: 50px;
+    max-height: 150px;
+}
+
+button {
+    padding: 10px 20px;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 16px;
+    transition: background-color 0.2s ease;
+}
+
+button:hover {
+    background-color: #0056b3;
+}
+
+input[type="file"] {
+    padding: 8px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    background-color: #fff;
+}
+
+.file-upload-section button {
+    margin-left: 10px;
+}
+
+.status-message {
+    margin-top: 10px;
+    font-size: 0.9em;
+    font-weight: bold;
+}
+
+/* Download Section Styling */
+#download-links {
+    margin-top: 10px;
+    min-height: 50px;
+    border: 1px dashed #ccc;
+    padding: 10px;
+    border-radius: 5px;
+    background-color: #fff;
+}
+
+#download-links p {
+    margin: 5px 0;
+}
+
+#download-links a {
+    color: #007bff;
+    text-decoration: none;
+}
+
+#download-links a:hover {
+    text-decoration: underline;
+}
