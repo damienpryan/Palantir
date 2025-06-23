@@ -46,3 +46,20 @@ dump-gateway:
 dump-palproj:
 	@echo "Dumping palproj files to palproj_dump.txt..."
 	(cd palproj && ../dump_project.sh) 
+
+# --- Testing Targets ---
+test:
+    @echo "--- Running UNIT tests for all services ---"
+    $(MAKE) -C palproj test
+    $(MAKE) -C gateway test
+
+test-integration:
+    @echo "--- Running INTEGRATION tests for all services ---"
+    # Ensure services are up before running integration tests (optional but good practice)
+    $(MAKE) up
+    @echo "\n--- Running Gateway Integration Tests ---"
+    $(MAKE) -C gateway test-integration
+    @echo "\n--- Running Palproj Integration Tests ---"
+    $(MAKE) -C palproj test-integration
+    @echo "\n--- All Integration Tests Completed ---"
+
