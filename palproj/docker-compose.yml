@@ -1,0 +1,84 @@
+# homelab/palproj/docker-compose.yml
+services:
+  app:
+    build: ./app
+    volumes:
+      - ./app:/app
+    networks:
+      - homelab_network # Use the external network
+    environment:
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY} # References variable from .env
+      # app_db connection details
+      APP_DB_HOST: app_db
+      APP_DB_NAME: palantir_app_db
+      APP_DB_USER: palantir_user
+      APP_DB_PASSWORD: ${DB_PASSWORD} # References variable from .env
+      # vector_db connection details (for LangChain)
+      VECTOR_DB_HOST: vector_db
+      VECTOR_DB_NAME: palantir_vector_db
+      VECTOR_DB_USER: palantir_vector_user
+      VECTOR_DB_PASSWORD: ${VECTOR_DB_PASSWORD} # New variable from .env
+    depends_on:
+      - app_db
+      - vector_db # App needs both databases
+
+  app_db:
+    image: postgres:15-alpine
+    container_name: palantir_app_db
+    environment:
+      POSTGRES_DB: palantir_app_db
+      POSTGRES_USER: palantir_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - app_db_data:/var/lib/postgresql/data
+    networks:
+      - homelab_network # Use the external network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U palantir_user -d palantir_app_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  vector_db:
+    image: pgvector/pgvector:pg16 # Using pgvector image for easier setup
+    container_name: palantir_vector_db
+    environment:
+      POSTGRES_DB: palantir_vector_db
+      POSTGRES_USER: palantir_vector_user
+      POSTGRES_PASSWORD: ${VECTOR_DB_PASSWORD} # New variable from .env
+    volumes:
+      - vector_db_data:/var/lib/postgresql/data
+    networks:
+      - homelab_network # Use the external network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U palantir_vector_user -d palantir_vector_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  ingestion:
+    build: ./ingestion # We will create this directory and Dockerfile next
+    volumes:
+      - ./ingestion:/ingestion # Mount for live code changes
+      - /home/damien/my_qad_code:/qad-code-repo:ro
+    networks:
+      - homelab_network # Use the external network
+    environment:
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY} # References variable from .env
+      VECTOR_DB_HOST: vector_db
+      VECTOR_DB_NAME: palantir_vector_db
+      VECTOR_DB_USER: palantir_vector_user
+      VECTOR_DB_PASSWORD: ${VECTOR_DB_PASSWORD}
+      CODE_REPO_PATH: /qad-code-repo
+    depends_on:
+      - vector_db # Ingestion needs the vector database
+
+# This block tells Docker Compose to use the network
+# created by the gateway's compose file.
+networks:
+  homelab_network:
+    external: true
+
+volumes:
+  app_db_data: # Volume for Flask app's PostgreSQL data
+  vector_db_data: # Volume for LLM vector database data

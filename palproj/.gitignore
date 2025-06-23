@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Docker
+.dockerignore
+
+# Environment variables
+.env
+*.env
+
+# Editor files
+*.swp
+
+# User uploaded files
+app/uploads/
