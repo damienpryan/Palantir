@@ -12,7 +12,7 @@ echo ""
 
 # Find all regular files in the current directory and its subdirectories
 # -print0 ensures correct handling of filenames with spaces or special characters
-find . -type f ! -path '*/.env' ! -name '*_dump.txt' -print0 | while IFS= read -r -d $'\0' file;
+find . -type f ! -path '*/.env' ! -name '*_dump.txt' -print0 | while IFS= read -r -d $'\0' file; do
     # Skip Git internal files
     if [[ "$file" == "./.git/"* ]]; then
         continue

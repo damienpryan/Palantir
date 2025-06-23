@@ -35,14 +35,14 @@ status:
 # Dumps the entire project from the homelab root.
 dump-all:
 	@echo "Dumping all project files to homelab_dump.txt..."
-	./dump_project.sh > homelab_dump.txt
+	./dump_project.sh 
 
 # Dumps only the gateway subdirectory.
 dump-gateway:
 	@echo "Dumping gateway files to gateway_dump.txt..."
-	(cd gateway && ../dump_project.sh) > gateway_dump.txt
+	(cd gateway && ../dump_project.sh) 
 
 # Dumps only the palproj subdirectory.
 dump-palproj:
 	@echo "Dumping palproj files to palproj_dump.txt..."
-	(cd palproj && ../dump_project.sh) > palproj_dump.txt
+	(cd palproj && ../dump_project.sh) 
