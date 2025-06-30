@@ -1,132 +1,113 @@
 # app/main.py
 
 import logging
-from flask import Flask, request, jsonify, send_from_directory
-from flask_migrate import Migrate
+from flask import Flask, request, jsonify, send_from_directory, session
+from flask_session import Session  # Import Flask-Session
 import os
 from dotenv import load_dotenv
+import uuid
 
-import uuid # For unique filenames for uploaded files
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.schema import HumanMessage, SystemMessage
 
-load_dotenv() # Load environment variables from .env
+load_dotenv()
 
 app = Flask(__name__)
 
-# --- Configure Logging ---
-log_level_str = os.getenv('LOG_LEVEL', 'INFO').upper() # Get LOG_LEVEL from .env
-log_level = getattr(logging, log_level_str, logging.INFO)
+# --- Session Configuration ---
+# Secret key for signing the session cookie
+app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'super-secret-key-for-dev')
+# Configure session to use the filesystem (server-side)
+app.config['SESSION_TYPE'] = 'filesystem'
+app.config['SESSION_FILE_DIR'] = './flask_session'  # Directory to store session files
+app.config['SESSION_PERMANENT'] = False
+app.config['SESSION_USE_SIGNER'] = True
+Session(app)
+# --- END Session Configuration ---
 
-# Remove any default Flask/Gunicorn handlers to ensure only our handler is active
+# --- Configure Logging ---
+log_level_str = os.getenv('LOG_LEVEL', 'INFO').upper()
+log_level = getattr(logging, log_level_str, logging.INFO);
+
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
 
-# Configure basic logging to stdout/stderr (which Docker captures)
 logging.basicConfig(
     level=log_level,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler() # Directs logs to console (stdout/stderr)
+        logging.StreamHandler()
     ]
 )
-app.logger.setLevel(log_level) # Set Flask's internal logger level
-# --- END Configure Logging -
+app.logger.setLevel(log_level)
+# --- END Configure Logging ---
 
-
-# Configure your PostgreSQL database for app data (from your proj_dump)
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('APP_DATABASE_URL')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# --- Google API Key for LLM ---
 google_api_key = os.getenv("GOOGLE_API_KEY")
 
 if not google_api_key or google_api_key == "your_google_api_key_here":
     app.logger.error("GOOGLE_API_KEY is not configured. LLM calls will fail.")
-    # For production, you might want to stop the app or raise an error here.
-    # For development, we'll let it proceed and return an error from the chat endpoint.
 
-# Initialize your LLM (from your proj_dump)
 llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=google_api_key)
 
-# This is where your vector store is configured, from proj_dump.txt
 COLLECTION_NAME = "qad_code_embeddings"
-PG_EMBEDDING_CONNECTION_STRING = os.getenv("PG_EMBEDDING_CONNECTION_STRING")
 
-# --- New: File Upload Configuration ---
-UPLOAD_FOLDER = 'uploads' # Folder inside the app container
-# Ensure the upload directory exists
+UPLOAD_FOLDER = 'uploads'
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
-
-# Global variable to store content of the last uploaded file for temporary context
-# NOTE: This is a *very simple* in-memory solution and will not scale or persist across requests/users.
-# For a real application, you'd integrate this with sessions, a temporary DB, or direct RAG processing.
-last_uploaded_file_content = ""
-
 
 @app.route('/')
 def home():
     return "Hello from Flask App! The frontend should be at /."
 
-# Placeholder for a database test route (from your dump)
-@app.route('/db_test')
-# Placeholder for a database test route (from your dump)
 @app.route('/db_test')
 def db_test():
     try:
-        from flask_sqlalchemy import SQLAlchemy # Import SQLAlchemy here if not global
-        from sqlalchemy import text # Import text for raw SQL queries
-
-        # Assume your 'db' object from Flask-SQLAlchemy is initialized somewhere
-        # If not, you might need to import it or create a temporary connection here
-        # For now, let's just make sure db is available from Flask-SQLAlchemy
-        # For simplicity, if Flask-SQLAlchemy 'db' object is not globally defined,
-        # you might need to add a line like:
-        # db = SQLAlchemy(app) # if not done globally already.
-        # But usually it's `db = SQLAlchemy()` then `db.init_app(app)`.
-
-        # Let's assume Flask-SQLAlchemy is configured via `app.config`
-        # and you have an initialized `db` object.
-        # If your db object is named 'db', then use 'db.session.execute'
-
-        # TEMPORARY: For a quick test, let's use psycopg2 directly if SQLAlchemy setup is complex
         import psycopg2
         DB_HOST = os.environ.get("APP_DB_HOST", "app_db")
         DB_NAME = os.environ.get("APP_DB_NAME", "palantir_app_db")
         DB_USER = os.environ.get("APP_DB_USER", "palantir_user")
-        DB_PASSWORD = os.environ.get("APP_DB_PASSWORD") # Get from .env
+        DB_PASSWORD = os.environ.get("APP_DB_PASSWORD")
 
         conn = psycopg2.connect(host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD)
         cursor = conn.cursor()
-        cursor.execute("SELECT 1") # A simple query to test connection
+        cursor.execute("SELECT 1")
         result = cursor.fetchone()
         cursor.close()
         conn.close()
 
-        # If we reached here, connection was successful
         app.logger.info("Successfully connected to app_db from /db_test.")
         return jsonify({"status": "Database connection successful", "test_query_result": result[0]})
     except Exception as e:
         app.logger.error(f"Error connecting to app_db from /db_test: {e}")
         return jsonify({"status": "Database connection error", "error": str(e)}), 500
 
-
-# Your COMBINED RAG chat endpoint
 @app.route('/chat/<path:query>', methods=['GET', 'POST'])
 def chat(query):
-    global last_uploaded_file_content # Access the global variable
-
     if not google_api_key or google_api_key == "your_google_api_key_here":
         return jsonify({"response": "Error: Google API Key not configured in .env"}), 500
 
+    context_filepath = session.get('context_filepath')
+    file_content = ""
+
+    if context_filepath and os.path.exists(context_filepath):
+        try:
+            with open(context_filepath, 'r', encoding='utf-8') as f:
+                file_content = f.read()
+            app.logger.info(f"Using context from session file: {context_filepath}")
+            # Clean up the file after reading
+            os.remove(context_filepath)
+            session.pop('context_filepath', None)
+        except Exception as e:
+            app.logger.error(f"Error reading or deleting context file {context_filepath}: {e}")
+            file_content = "" # Ensure content is clear on error
+
     try:
-        # --- ORIGINAL LANGCHAIN RAG LOGIC RE-INTEGRATED ---
-        # Add the context from the last uploaded file to the query
         effective_query = query
-        if last_uploaded_file_content:
-            effective_query = f"Here is some relevant context:\n{last_uploaded_file_content}\n\nBased on this context and the following question: {query}"
-            app.logger.info(f"Using uploaded file content as context for query: {query}")
+        if file_content:
+            effective_query = f"Here is some relevant context:\n{file_content}\n\nBased on this context and the following question: {query}"
     
         messages = [
             SystemMessage(content="You are a helpful AI assistant for OpenEdge code. Provide concise and relevant information based on the user's query and any provided context."),
@@ -134,8 +115,7 @@ def chat(query):
         ]
     
         llm_response_object = llm.invoke(messages)
-        llm_response_content = llm_response_object.content # Extract content from the LangChain response object
-        # --- END ORIGINAL LANGCHAIN RAG LOGIC ---
+        llm_response_content = llm_response_object.content
 
         return jsonify({"query": query, "response": llm_response_content})
 
@@ -143,11 +123,8 @@ def chat(query):
         app.logger.error(f"Error communicating with LLM: {e}")
         return jsonify({"response": f"Error communicating with LLM: {str(e)}"}), 500
 
-
 @app.route('/upload_context', methods=['POST'])
 def upload_context():
-    global last_uploaded_file_content # Declare intent to modify global
-
     if 'file' not in request.files:
         return jsonify({"message": "No file part in the request"}), 400
 
@@ -157,31 +134,21 @@ def upload_context():
         return jsonify({"message": "No selected file"}), 400
 
     if file:
-        # Generate a unique filename to prevent conflicts
         unique_filename = str(uuid.uuid4()) + "_" + file.filename
         filepath = os.path.join(UPLOAD_FOLDER, unique_filename)
-        file.save(filepath)
-
-        file_content = ""
-        try:
-            # Attempt to read content for text-based files
-            with open(filepath, 'r', encoding='utf-8') as f:
-                file_content = f.read()
-            app.logger.info(f"File '{unique_filename}' uploaded and content read. Length: {len(file_content)}")
+        
+        # Clean up any old file path in session before saving new one
+        old_filepath = session.get('context_filepath')
+        if old_filepath and os.path.exists(old_filepath):
+            os.remove(old_filepath)
             
-            # Store content in the global variable for temporary context
-            last_uploaded_file_content = file_content
-
-        except Exception as e:
-            app.logger.error(f"Error reading uploaded file {unique_filename}: {e}")
-            last_uploaded_file_content = "" # Clear if error reading
-            return jsonify({"message": "File uploaded but failed to read content", "filename": unique_filename, "error": str(e)}), 500
+        file.save(filepath)
+        session['context_filepath'] = filepath # Store file path in session
+        app.logger.info(f"File '{unique_filename}' uploaded and path stored in session.")
 
         return jsonify({
-            "message": "File uploaded successfully",
-            "filename": unique_filename,
-            "original_filename": file.filename,
-            "file_size": file.content_length,
+            "message": "File uploaded successfully and is ready for context.",
+            "filename": unique_filename
         }), 200
 
     return jsonify({"message": "File upload failed"}), 500
@@ -189,13 +156,11 @@ def upload_context():
 @app.route('/download/<filename>', methods=['GET'])
 def download_file(filename):
     try:
-        # This will serve files from the UPLOAD_FOLDER
         return send_from_directory(UPLOAD_FOLDER, filename, as_attachment=True)
     except FileNotFoundError:
         return jsonify({"message": "File not found"}), 404
     except Exception as e:
         return jsonify({"message": f"Error serving file: {str(e)}"}), 500
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)

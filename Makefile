@@ -16,11 +16,11 @@ down:
 
 logs:
 	@if [ -z "$(stack)" ]; then \
-	    echo "--- Tailing combined logs for all stacks ---"; \
-	    docker compose -f gateway/docker-compose.yml -f palproj/docker-compose.yml logs -f; \
+		echo "--- Tailing combined logs for all stacks ---"; \
+		docker compose -f gateway/docker-compose.yml -f palproj/docker-compose.yml logs -f; \
 	else \
-	    echo "--- Tailing logs for $(stack) stack ---"; \
-	    $(MAKE) -C $(stack) logs; \
+		echo "--- Tailing logs for $(stack) stack ---"; \
+		$(MAKE) -C $(stack) logs; \
 	fi
 
 restart: down up

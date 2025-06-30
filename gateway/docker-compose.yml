@@ -21,7 +21,7 @@ services:
         hard: -1
 
   nginx:
-    image: nginx:latest
+    build: ./nginx
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro # <-- Corrected line 26
       - ./nginx/html:/usr/share/nginx/html:ro
@@ -31,6 +31,8 @@ services:
       - homelab_network # Connect to our new shared network
     depends_on:
       - cloudflare-tunnel
+
+  
 
 # This block creates the network that palproj will also use.
 networks:

@@ -19,25 +19,24 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Handle sending query
     sendQueryButton.addEventListener('click', async () => {
-        const query = userQueryInput.value.trim();
-        if (query === '') {
-            return;
-        }
-
-        addMessageToChat('user', query);
-        userQueryInput.value = ''; // Clear input
-
         try {
-            // Replace with your actual Flask RAG endpoint
-            const response = await fetch(`/app/chat/${encodeURIComponent(query)}`);
+            const query = userQueryInput.value.trim();
+            if (query === '') {
+                return;
+            }
+
+            addMessageToChat('user', query);
+            userQueryInput.value = ''; // Clear input
+
+            const response = await fetch(`/api/chat/${encodeURIComponent(query)}`);
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
             }
             const data = await response.json();
             addMessageToChat('ai', data.response || 'No specific response received.'); // Assuming Flask returns { "response": "..." }
         } catch (error) {
-            console.error('Error fetching RAG response:', error);
-            addMessageToChat('ai', 'Error: Could not get a response. Please try again.');
+            console.error('Error in sendQueryButton click handler:', error);
+            addMessageToChat('ai', `A critical JavaScript error occurred: ${error.message}`);
         }
     });
 
@@ -66,7 +65,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         try {
             // Replace with your actual Flask file upload endpoint
-            const response = await fetch('/app/upload_context', {
+            const response = await fetch('/api/upload_context', {
                 method: 'POST',
                 body: formData,
             });
@@ -100,7 +99,7 @@ document.addEventListener('DOMContentLoaded', () => {
             files.forEach(file => {
                 const linkElement = document.createElement('p');
                 // Assuming Flask provides a download URL like /app/download/filename.ext
-                linkElement.innerHTML = `<a href="/app/download/${encodeURIComponent(file.filename)}" target="_blank">${file.display_name || file.filename}</a>`;
+                linkElement.innerHTML = `<a href="/api/download/${encodeURIComponent(file.filename)}" target="_blank">${file.display_name || file.filename}</a>`;
                 downloadLinksArea.appendChild(linkElement);
             });
         } else {

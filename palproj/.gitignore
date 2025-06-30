@@ -22,3 +22,4 @@ venv/
 
 # User uploaded files
 app/uploads/
+app/flask_session/
