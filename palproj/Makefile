@@ -1,5 +1,5 @@
 # homelab/palproj/Makefile
-.PHONY: up down logs restart status build test test-integration # <-- ADDED TEST TARGETS
+.PHONY: up down logs restart status build test test-integration cli-run # <-- ADDED TEST TARGETS
 
 up:
 	@echo "Starting Palantir application services..."
@@ -23,11 +23,16 @@ build:
 	@echo "Building Palantir application service images..."
 	docker compose build
 
+# --- CLI Target ---
+cli-run:
+	@echo "Running CLI command..."
+	docker compose run --rm cli $(filter-out $@,$(MAKECMDGOALS))
+
 # --- Testing Targets ---
 test:
 	@echo "Running UNIT tests for palproj services (app, ingestion)..."
 	# Example for 'app' service assuming pytest is used and tests are in /app/tests
-	# docker compose run --rm app pytest /app/tests
+	# docker compose run --rm app pytest /app/t
 	# Example for 'ingestion' service assuming pytest is used and tests are in /ingestion/tests
 	# docker compose run --rm ingestion pytest /ingestion/tests
 	@echo "No dedicated unit tests configured for palproj yet. Please set up tests/ directories and pytest calls."

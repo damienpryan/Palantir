@@ -80,6 +80,17 @@ services:
     depends_on:
       - vector_db # Ingestion needs the vector database
 
+  cli:
+    build: ./cli
+    container_name: cli
+    networks:
+      - homelab_network
+    environment:
+      PALANTIR_API_URL: http://nginx/api
+    # We don't want the CLI to run automatically, so we'll override the command
+    # to do nothing. We'll use `docker compose run` to execute commands.
+    command: tail -f /dev/null
+
 # This block tells Docker Compose to use the network
 # created by the gateway's compose file.
 networks:

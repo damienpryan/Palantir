@@ -1,7 +1,7 @@
 # homelab/Makefile - Master Orchestrator
 
 # Add the new dump targets to the .PHONY list
-.PHONY: up down logs restart status dump-all dump-gateway dump-palproj test test-integration # <-- ADDED TEST TARGETS
+.PHONY: up down logs restart status dump-all dump-gateway dump-palproj test test-integration cli-run cli-test # <-- ADDED TEST TARGETS
 
 # --- Service Management Targets ---
 up:
@@ -30,6 +30,13 @@ status:
 	$(MAKE) -C gateway status
 	@echo "\n--- Status for palproj stack ---"
 	$(MAKE) -C palproj status
+
+# --- CLI Targets ---
+cli-run:
+	@$(MAKE) -C palproj cli-run ARGS="$(ARGS)"
+
+cli-test:
+	@$(MAKE) -C palproj/cli test
 
 # --- AI Context Dumping Targets ---
 # Dumps the entire project from the homelab root.

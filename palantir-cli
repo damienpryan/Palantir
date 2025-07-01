@@ -1,0 +1,20 @@
+#!/bin/bash
+# Wrapper script to run the Palantir CLI from the project root.
+
+# Get the absolute path of the directory where the script is located.
+# This ensures that the docker compose command runs in the correct project directory,
+# even if the script is called from a different location.
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+
+# Check if arguments were provided. If not, show a help message.
+if [ -z "$*" ]; then
+  echo "Usage: ./palantir-cli <command> [arguments]"
+  echo "Example: ./palantir-cli chat 'how do I define a temp-table?'"
+  # Execute the default help command from the CLI
+  (cd "$SCRIPT_DIR/palproj" && docker compose run --rm cli --help)
+  exit 1
+fi
+
+# Execute the docker compose command from the palproj directory, passing all
+# arguments from this script to the CLI.
+(cd "$SCRIPT_DIR/palproj" && docker compose run --rm cli "$@")
