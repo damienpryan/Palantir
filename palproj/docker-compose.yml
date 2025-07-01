@@ -2,6 +2,7 @@
 services:
   app:
     build: ./app
+    container_name: app
     volumes:
       - ./app:/app
     networks:
@@ -21,6 +22,12 @@ services:
     depends_on:
       - app_db
       - vector_db # App needs both databases
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail http://localhost:5000/db_test || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
 
   app_db:
     image: postgres:15-alpine

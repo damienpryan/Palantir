@@ -6,6 +6,7 @@ WORKDIR /ingestion
 
 # Copy requirements.txt and install dependencies FIRST for better Docker caching
 COPY requirements.txt .
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the current directory into the container (which will be empty for now)

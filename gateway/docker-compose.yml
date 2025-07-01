@@ -23,16 +23,12 @@ services:
   nginx:
     build: ./nginx
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro # <-- Corrected line 26
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/html:/usr/share/nginx/html:ro
     ports:
       - "80:80"
     networks:
-      - homelab_network # Connect to our new shared network
-    depends_on:
-      - cloudflare-tunnel
-
-  
+      - homelab_network
 
 # This block creates the network that palproj will also use.
 networks:
